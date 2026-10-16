@@ -1,15 +1,24 @@
-//! Steps that run after ReSkate Studio's compile, on the native Patch folder it writes: the Frostbite containers
-//! they read and write (`fb`), the MeshSet resource (`meshset`) and per-vertex blending onto stock material rows
-//! (`vblend`).
+//! Frostbite containers as skate. (ReSkate) reads and writes them: superbundle TOCs, bundle regions and manifests,
+//! the native DB, data folders and CAS archives, shader block depots and the shader lookup tables of
+//! `dingolevel_root`.
+//!
+//! It covers the Frostbite generation skate. uses (its build of the containers and their versions, as Studio and
+//! ReSkate write them); other Frostbite titles are not assumed to match.
 //!
 //! Every reader is strict (it walks to the exact end of what it reads and rejects anything it does not know) and
 //! every writer is the counterpart of the reader: an unmodified Patch read and written again is byte-identical.
-//!
-//! The Frostbite code lives here until a second game needs it; it then moves to a toolkit crate.
 
-pub mod fb;
-pub mod meshset;
-pub mod vblend;
+pub mod bundle;
+pub mod db;
+pub mod depot;
+pub mod folder;
+pub mod lookup;
+pub mod toc;
+
+/// Resource type of a MeshSet.
+pub const MESHSET: u32 = 0x49B1_56D4;
+/// Resource type of a texture.
+pub const TEXTURE: u32 = 0x6BDE_20BA;
 
 /// Errors of the post-compile readers and writers: what broke and where.
 #[derive(Debug, thiserror::Error)]
@@ -33,7 +42,8 @@ pub enum Error {
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
-pub(crate) fn bad(what: &'static str, offset: usize, detail: impl Into<String>) -> Error {
+/// A format error: what was being read, where, and what broke.
+pub fn bad(what: &'static str, offset: usize, detail: impl Into<String>) -> Error {
     Error::Format {
         what,
         offset,
@@ -42,7 +52,8 @@ pub(crate) fn bad(what: &'static str, offset: usize, detail: impl Into<String>) 
 }
 
 /// Bounds-checked fixed-size reads, little and big endian.
-pub(crate) struct Rd<'a> {
+#[derive(Debug)]
+pub struct Rd<'a> {
     pub data: &'a [u8],
     pub what: &'static str,
 }
@@ -106,7 +117,7 @@ impl<'a> Rd<'a> {
 }
 
 /// Latin-1 bytes of a name (Frostbite names are stored one byte per character).
-pub(crate) fn latin1(s: &str, what: &'static str) -> Result<Vec<u8>> {
+pub fn latin1(s: &str, what: &'static str) -> Result<Vec<u8>> {
     s.chars()
         .map(|c| u8::try_from(u32::from(c)).map_err(|_| bad(what, 0, format!("name {s:?} is not Latin-1"))))
         .collect()
@@ -114,12 +125,7 @@ pub(crate) fn latin1(s: &str, what: &'static str) -> Result<Vec<u8>> {
 
 /// Capacity for `count` entries that each take at least `min_bytes` of the `remaining` input bytes: refused before
 /// anything is reserved when they cannot fit, so a corrupt count returns an error instead of exhausting memory.
-pub(crate) fn capacity(
-    what: &'static str,
-    count: usize,
-    min_bytes: usize,
-    remaining: usize,
-) -> Result<usize> {
+pub fn capacity(what: &'static str, count: usize, min_bytes: usize, remaining: usize) -> Result<usize> {
     match count.checked_mul(min_bytes) {
         Some(n) if n <= remaining => Ok(count),
         _ => Err(bad(
@@ -130,6 +136,7 @@ pub(crate) fn capacity(
     }
 }
 
-pub(crate) fn align(v: usize, a: usize) -> usize {
+/// `v` rounded up to a multiple of `a`.
+pub fn align(v: usize, a: usize) -> usize {
     v.div_ceil(a) * a
 }

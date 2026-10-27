@@ -1,9 +1,4 @@
 //! Decoding an EBX document from its bytes (ReSkate `ebx_document.cpp`, `read_document`).
-#![allow(
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-    clippy::cast_possible_truncation
-)] // lint-todo
 use std::collections::BTreeMap;
 
 use super::{
@@ -26,7 +21,21 @@ const RFL2: u32 = 0x5246_4C32;
 const MAX_DEPTH: u32 = 128;
 
 pub(crate) fn align_up(v: usize, a: usize) -> usize {
-    if a <= 1 { v } else { v.div_ceil(a) * a }
+    if a <= 1 {
+        v
+    } else {
+        v.div_ceil(a).saturating_mul(a)
+    }
+}
+
+/// The data-relative form of the place `position` plus `displacement` names, after `data_start` is taken off (the key
+/// the instance and array tables are indexed by); saturating, so a displacement that leaves the address space names no
+/// entry.
+fn data_relative(position: usize, displacement: i64, data_start: usize) -> i64 {
+    i64::try_from(position)
+        .unwrap_or(i64::MAX)
+        .saturating_add(displacement)
+        .saturating_sub(i64::try_from(data_start).unwrap_or(0))
 }
 
 /// The document's cursor ([`primase_foundations::bytes::Cursor`]), with its strings, counts and extents as methods.
@@ -56,7 +65,10 @@ impl<'a> Cursor<'a> {
     }
     /// That `count` records of `stride` bytes fit before `end`.
     fn ensure(&self, end: usize, count: usize, stride: usize, what: &'static str) -> Result<()> {
-        if self.position() > end || count > (end - self.position()) / stride {
+        let room = end
+            .checked_sub(self.position())
+            .and_then(|room| room.checked_div(stride));
+        if room.is_none_or(|room| count > room) {
             return Err(bad(
                 what,
                 self.position(),
@@ -66,13 +78,17 @@ impl<'a> Cursor<'a> {
         Ok(())
     }
     fn c_string(&mut self) -> Result<Vec<u8>> {
-        let rest = &self.bytes()[self.position()..];
-        let n = rest
-            .iter()
-            .position(|&b| b == 0)
-            .ok_or_else(|| bad("string", self.position(), "unterminated"))?;
-        let s = rest[..n].to_vec();
-        self.take(n + 1)?;
+        let rest = self.bytes().get(self.position()..).unwrap_or_default();
+        let mut parts = rest.splitn(2, |&b| b == 0);
+        let (Some(text), Some(_)) = (parts.next(), parts.next()) else {
+            return Err(bad(
+                "string",
+                self.position(),
+                "unterminated, expected a zero byte",
+            ));
+        };
+        let s = text.to_vec();
+        self.take(s.len().saturating_add(1))?;
         Ok(s)
     }
 }
@@ -88,7 +104,7 @@ fn read_chunks(r: &mut Cursor) -> Result<Vec<Chunk>> {
     if r.u32(Endian::Little)? != RIFF {
         return Err(bad("RIFF", 0, "not a RIFF document"));
     }
-    let riff_end = r.u32(Endian::Little)? as usize + 8;
+    let riff_end = (r.u32(Endian::Little)? as usize).saturating_add(8);
     if riff_end != r.bytes().len() {
         return Err(bad(
             "RIFF",
@@ -102,18 +118,18 @@ fn read_chunks(r: &mut Cursor) -> Result<Vec<Chunk>> {
     }
     let mut chunks = Vec::new();
     while r.position() < riff_end {
-        if r.bytes().len() - r.position() < 8 {
+        if r.bytes().len().saturating_sub(r.position()) < 8 {
             return Err(bad("RIFF", r.position(), "truncated chunk header"));
         }
         let id = r.u32(Endian::Big)?;
         let size = r.u32(Endian::Little)? as usize;
         let begin = r.position();
-        if size > riff_end - begin {
+        if riff_end.checked_sub(begin).is_none_or(|room| size > room) {
             return Err(bad("RIFF", begin, "chunk exceeds its document"));
         }
-        let end = begin + size;
+        let end = begin.saturating_add(size);
         chunks.push(Chunk { id, begin, end });
-        let next = end + (size & 1);
+        let next = end.saturating_add(size & 1);
         if next > riff_end {
             return Err(bad("RIFF", end, "chunk padding is truncated"));
         }
@@ -137,10 +153,14 @@ fn one_chunk(chunks: &[Chunk], id: u32, name: &'static str, required: bool) -> R
 }
 
 fn validate_data_offset(doc: &Document, offset: u32, required: usize, what: &'static str) -> Result<()> {
-    let size = doc.data_end - doc.data_start;
+    let size = doc.data_end.saturating_sub(doc.data_start);
     let o = offset as usize;
-    if o > size || required > size - o {
-        return Err(bad(what, doc.data_start + o, "offset exceeds EBXD"));
+    if o > size || required > size.saturating_sub(o) {
+        return Err(bad(
+            what,
+            doc.data_start.saturating_add(o),
+            format!("offset exceeds EBXD: expected {required} bytes at most {size} bytes into the data"),
+        ));
     }
     Ok(())
 }
@@ -174,8 +194,19 @@ fn read_fixup(r: &mut Cursor, c: Chunk, doc: &mut Document) -> Result<()> {
     for i in 0..instances {
         let offset = r.u32(Endian::Little)?;
         validate_data_offset(doc, offset, 2, "EFIX instance")?;
-        let at = doc.data_start + offset as usize;
-        let class_ref = u16::from_le_bytes([r.bytes()[at], r.bytes()[at + 1]]);
+        let at = doc.data_start.saturating_add(offset as usize);
+        let class_ref = r
+            .bytes()
+            .get(at..)
+            .and_then(|b| b.first_chunk::<2>())
+            .map(|b| u16::from_le_bytes(*b))
+            .ok_or_else(|| {
+                bad(
+                    "EFIX instance",
+                    at,
+                    "instance type slot past the end: expected 2 bytes",
+                )
+            })?;
         if usize::from(class_ref) >= doc.fixup_type_guids.len() {
             return Err(bad(
                 "EFIX instance",
@@ -216,7 +247,7 @@ fn read_fixup(r: &mut Cursor, c: Chunk, doc: &mut Document) -> Result<()> {
     }
     doc.import_offsets = offsets(r, doc, "EFIX import relocation", 8)?;
     doc.type_info_offsets = offsets(r, doc, "EFIX type-info reference", 8)?;
-    if c.end - r.position() < 12 {
+    if c.end.saturating_sub(r.position()) < 12 {
         return Err(bad("EFIX", r.position(), "truncated section offsets"));
     }
     doc.arrays_offset = r.u32(Endian::Little)?;
@@ -285,15 +316,22 @@ fn read_extra(r: &mut Cursor, c: Chunk, doc: &mut Document) -> Result<()> {
 }
 
 fn string_at(d: &[u8], offset: usize, end: usize) -> Result<String> {
-    if offset >= end {
-        return Err(bad("reflection string", offset, "offset is invalid"));
-    }
-    let s = &d[offset..end];
-    let n = s
-        .iter()
-        .position(|&b| b == 0)
-        .ok_or_else(|| bad("reflection string", offset, "unterminated"))?;
-    String::from_utf8(s[..n].to_vec()).map_err(|_| bad("reflection string", offset, "is not UTF-8"))
+    let s = d.get(offset..end).filter(|s| !s.is_empty()).ok_or_else(|| {
+        bad(
+            "reflection string",
+            offset,
+            "offset is invalid: expected a string inside the chunk",
+        )
+    })?;
+    let mut parts = s.splitn(2, |&b| b == 0);
+    let (Some(text), Some(_)) = (parts.next(), parts.next()) else {
+        return Err(bad(
+            "reflection string",
+            offset,
+            "unterminated, expected a zero byte",
+        ));
+    };
+    String::from_utf8(text.to_vec()).map_err(|_| bad("reflection string", offset, "is not UTF-8"))
 }
 
 /// The reflection table; returns each type's (guid, signature) for mapping instances.
@@ -352,8 +390,12 @@ fn read_reflection(
         });
     }
     for t in &doc.types {
-        let ok = usize::try_from(t.field_index)
-            .is_ok_and(|fi| fi <= doc.fields.len() && usize::from(t.field_count) <= doc.fields.len() - fi);
+        let ok = usize::try_from(t.field_index).is_ok_and(|fi| {
+            doc.fields
+                .len()
+                .checked_sub(fi)
+                .is_some_and(|room| usize::from(t.field_count) <= room)
+        });
         if !ok {
             return Err(bad(
                 "reflection type",
@@ -373,7 +415,7 @@ fn read_reflection(
     }
     let nmap = r.nonnegative("reflection mapping")?;
     r.ensure(c.end, nmap, 8, "reflection mapping")?;
-    r.take(nmap * 8)?;
+    r.take(crate::at(0, nmap, 8))?;
     if hashed {
         let nnames = r.nonnegative("reflection name")?;
         r.ensure(c.end, nnames, 8, "reflection name")?;
@@ -392,7 +434,7 @@ fn read_reflection(
                     format!("{h:#x} is missing from {} names", names.len()),
                 )
             })?;
-            string_at(r.bytes(), strings + o, c.end)
+            string_at(r.bytes(), strings.saturating_add(*o), c.end)
         };
         for t in &mut doc.types {
             t.name = lookup(t.name_hash)?;
@@ -403,10 +445,10 @@ fn read_reflection(
     } else {
         let strings = r.position();
         for t in &mut doc.types {
-            t.name = string_at(r.bytes(), strings + t.name_hash as usize, c.end)?;
+            t.name = string_at(r.bytes(), strings.saturating_add(t.name_hash as usize), c.end)?;
         }
         for f in &mut doc.fields {
-            f.name = string_at(r.bytes(), strings + f.name_hash as usize, c.end)?;
+            f.name = string_at(r.bytes(), strings.saturating_add(f.name_hash as usize), c.end)?;
         }
     }
     Ok(ids)
@@ -441,7 +483,7 @@ impl<'a> Values<'a> {
             fields: Vec::new(),
         };
         self.fields(&mut o, descriptor, start)?;
-        self.depth -= 1;
+        self.depth = self.depth.saturating_sub(1);
         Ok(o)
     }
 
@@ -449,16 +491,26 @@ impl<'a> Values<'a> {
         if self.depth >= MAX_DEPTH {
             return Err(bad("EBX type", at, "types nest too deeply"));
         }
-        self.depth += 1;
+        self.depth = self.depth.saturating_add(1);
         Ok(())
     }
 
     fn fields(&mut self, out: &mut Object, type_index: usize, start: usize) -> Result<()> {
-        let t = &self.doc.types[type_index];
+        let t = self
+            .doc
+            .types
+            .get(type_index)
+            .ok_or_else(|| bad("EBX type", start, "type reference is invalid"))?;
         let first = usize::try_from(t.field_index).unwrap_or(0);
         for k in 0..usize::from(t.field_count) {
-            let di = first + k;
-            let f = &self.doc.fields[di];
+            let di = first.saturating_add(k);
+            let f = self.doc.fields.get(di).ok_or_else(|| {
+                bad(
+                    "EBX field",
+                    start,
+                    format!("field {di} of {} is invalid", self.doc.fields.len()),
+                )
+            })?;
             if f.ty() == FieldType::Inherited {
                 let base = usize::from(f.class_ref);
                 if base >= self.doc.types.len() {
@@ -466,10 +518,10 @@ impl<'a> Values<'a> {
                 }
                 self.nest(start)?;
                 self.fields(out, base, start)?;
-                self.depth -= 1;
+                self.depth = self.depth.saturating_sub(1);
                 continue;
             }
-            let position = start + f.data_offset as usize;
+            let position = start.saturating_add(f.data_offset as usize);
             if position > self.doc.data_end {
                 return Err(bad("EBX field", position, "offset exceeds EBXD"));
             }
@@ -478,13 +530,19 @@ impl<'a> Values<'a> {
                 && let Value::Array(items, hash) = &mut value
                 && !items.is_empty()
             {
-                let disp = i32::from_le_bytes([
-                    self.d[position],
-                    self.d[position + 1],
-                    self.d[position + 2],
-                    self.d[position + 3],
-                ]);
-                let target = position as i64 + i64::from(disp) - self.doc.data_start as i64;
+                let disp = self
+                    .d
+                    .get(position..)
+                    .and_then(|b| b.first_chunk::<4>())
+                    .map(|b| i32::from_le_bytes(*b))
+                    .ok_or_else(|| {
+                        bad(
+                            "EBX array",
+                            position,
+                            "array displacement past the end: expected 4 bytes",
+                        )
+                    })?;
+                let target = data_relative(position, i64::from(disp), self.doc.data_start);
                 *hash = self.array_hashes.get(&target).copied();
             }
             out.fields.push(FieldValue {
@@ -500,17 +558,18 @@ impl<'a> Values<'a> {
         if f.is_array() {
             self.r.seek(position)?;
             let disp = self.r.i32(Endian::Little)?;
-            let target = position as i64 + i64::from(disp);
-            let low = (self.doc.data_start + 4) as i64;
-            let high = self.doc.data_end as i64;
-            if !(low..=high).contains(&target) {
-                return Err(bad("EBX array", position, "displacement exceeds EBXD"));
-            }
-            let target = target as usize;
-            self.r.seek(target - 4)?;
+            let target = data_relative(position, i64::from(disp), 0);
+            let low = i64::try_from(self.doc.data_start.saturating_add(4)).unwrap_or(i64::MAX);
+            let high = i64::try_from(self.doc.data_end).unwrap_or(i64::MAX);
+            let target = match usize::try_from(target) {
+                Ok(t) if (low..=high).contains(&target) => t,
+                _ => return Err(bad("EBX array", position, "displacement exceeds EBXD")),
+            };
+            let count_at = target.saturating_sub(4);
+            self.r.seek(count_at)?;
             let count = usize::try_from(self.r.i32(Endian::Little)?)
-                .map_err(|_| bad("EBX array", target - 4, "negative count"))?;
-            if count > self.doc.data_end - target {
+                .map_err(|_| bad("EBX array", count_at, "negative count"))?;
+            if count > self.doc.data_end.saturating_sub(target) {
                 return Err(bad("EBX array", target, format!("{count} elements exceed EBXD")));
             }
             self.r.seek(target)?;
@@ -525,7 +584,7 @@ impl<'a> Values<'a> {
                             .types
                             .get(usize::from(f.class_ref))
                             .ok_or_else(|| bad("EBX array", element, "struct type is invalid"))?;
-                        self.r.seek(element + usize::from(t.size))?;
+                        self.r.seek(element.saturating_add(usize::from(t.size)))?;
                     }
                     FieldType::Pointer | FieldType::CString => {
                         let p = align_up(self.r.position(), 8);
@@ -544,9 +603,9 @@ impl<'a> Values<'a> {
         let r = &mut self.r;
         Ok(match ty {
             FieldType::Boolean => Value::Bool(r.u8()? != 0),
-            FieldType::Int8 => Value::Int(i64::from(r.u8()? as i8)),
+            FieldType::Int8 => Value::Int(i64::from(r.u8()?.cast_signed())),
             FieldType::UInt8 => Value::UInt(u64::from(r.u8()?)),
-            FieldType::Int16 => Value::Int(i64::from(r.u16(Endian::Little)? as i16)),
+            FieldType::Int16 => Value::Int(i64::from(r.u16(Endian::Little)?.cast_signed())),
             FieldType::UInt16 => Value::UInt(u64::from(r.u16(Endian::Little)?)),
             FieldType::Int32 | FieldType::Enumeration => Value::Int(i64::from(r.i32(Endian::Little)?)),
             FieldType::UInt32 => Value::UInt(u64::from(r.u32(Endian::Little)?)),
@@ -559,8 +618,7 @@ impl<'a> Values<'a> {
             FieldType::ResourceRef => Value::Resource(r.u64(Endian::Little)?),
             FieldType::String => {
                 let raw = r.take(32)?;
-                let n = raw.iter().position(|&b| b == 0).unwrap_or(32);
-                Value::Str(raw[..n].to_vec())
+                Value::Str(raw.split(|&b| b == 0).next().unwrap_or_default().to_vec())
             }
             FieldType::CString => {
                 let disp = r.u32(Endian::Little)?;
@@ -582,7 +640,7 @@ impl<'a> Values<'a> {
                         .ok_or_else(|| bad("EBX pointer", position, "import is invalid"))?;
                     Value::Pointer(Pointer::External(index))
                 } else {
-                    let target = position as i64 + i64::from(encoded) - self.doc.data_start as i64;
+                    let target = data_relative(position, i64::from(encoded), self.doc.data_start);
                     let i = *self
                         .instance_at
                         .get(&target)
@@ -604,7 +662,7 @@ impl<'a> Values<'a> {
                     let bits = ((encoded & !0x8000_0000) >> 5) & 0x1F;
                     Value::TypeRef(TypeRef {
                         primitive: true,
-                        primitive_type: Some(FieldType::from_bits(bits as u16)),
+                        primitive_type: Some(FieldType::from_bits(u16::try_from(bits).unwrap_or_default())),
                         descriptor: None,
                         encoded,
                     })
@@ -621,8 +679,10 @@ impl<'a> Values<'a> {
                 let encoded_type = r.u32(Endian::Little)?;
                 r.take(4)?;
                 let disp = r.i64(Endian::Little)?;
-                let target = (position + 8) as i64 + disp - self.doc.data_start as i64;
-                self.boxed_slots.push((position - self.doc.data_start) as u32);
+                let target = data_relative(position.saturating_add(8), disp, self.doc.data_start);
+                let slot = u32::try_from(position.saturating_sub(self.doc.data_start))
+                    .map_err(|_| bad("EBX boxed value", position, "offset does not fit 32 bits"))?;
+                self.boxed_slots.push(slot);
                 Value::Boxed(BoxedRef {
                     encoded_type,
                     data_offset: target,
@@ -638,15 +698,15 @@ impl<'a> Values<'a> {
         if disp == u32::MAX {
             return Ok(Vec::new());
         }
-        let target = base as u64 + u64::from(disp);
-        if !(self.doc.data_start as u64..self.doc.data_end as u64).contains(&target) {
+        let target = base.saturating_add(disp as usize);
+        if !(self.doc.data_start..self.doc.data_end).contains(&target) {
             return Err(bad("EBX string", base, "displacement exceeds EBXD"));
         }
         let saved = self.r.position();
-        self.r.seek(target as usize)?;
+        self.r.seek(target)?;
         let s = self.r.c_string()?;
         if self.r.position() > self.doc.data_end {
-            return Err(bad("EBX string", target as usize, "exceeds EBXD"));
+            return Err(bad("EBX string", target, "exceeds EBXD"));
         }
         self.r.seek(saved)?;
         Ok(s)
@@ -683,7 +743,10 @@ pub fn read(bytes: &[u8]) -> Result<Document> {
         strings_offset: 0,
         serialized_layout,
         hashed_reflection_names: hashed,
-        reflection_data: bytes[reflection.begin..reflection.end].to_vec(),
+        reflection_data: bytes
+            .get(reflection.begin..reflection.end)
+            .ok_or_else(|| bad("RIFF", reflection.begin, "reflection chunk past the end"))?
+            .to_vec(),
         fixup_type_guids: Vec::new(),
         fixup_type_signatures: Vec::new(),
         boxed_reference_offsets: Vec::new(),
@@ -698,7 +761,10 @@ pub fn read(bytes: &[u8]) -> Result<Document> {
         import_offsets: Vec::new(),
         type_info_offsets: Vec::new(),
         boxed_value_slots: Vec::new(),
-        payload: bytes[data_start..data.end].to_vec(),
+        payload: bytes
+            .get(data_start..data.end)
+            .ok_or_else(|| bad("EBXD", data_start, "data chunk past the end"))?
+            .to_vec(),
         reflection_groups: Vec::new(),
     };
     read_fixup(&mut r, fixup, &mut doc)?;
@@ -707,12 +773,13 @@ pub fn read(bytes: &[u8]) -> Result<Document> {
     // map instances to reflection types by (guid, signature)
     for inst in &mut doc.instances {
         let slot = usize::from(inst.fixup_type);
-        if slot >= doc.fixup_type_guids.len() || slot >= doc.fixup_type_signatures.len() {
+        let (Some(guid), Some(signature)) = (
+            doc.fixup_type_guids.get(slot),
+            doc.fixup_type_signatures.get(slot),
+        ) else {
             continue;
-        }
-        inst.descriptor = ids
-            .iter()
-            .position(|&(g, s)| g == doc.fixup_type_guids[slot] && s == doc.fixup_type_signatures[slot]);
+        };
+        inst.descriptor = ids.iter().position(|&(g, s)| g == *guid && s == *signature);
     }
     if let Some(d) = doc.instances.first().and_then(|i| i.descriptor)
         && let Some(t) = doc.types.get(d)
@@ -742,18 +809,23 @@ pub fn read(bytes: &[u8]) -> Result<Document> {
         for inst in &mut instances {
             let Some(d) = inst.descriptor else { continue };
             let Some(t) = doc.types.get(d) else { continue };
-            let start = doc.data_start + inst.data_offset as usize;
+            let start = doc.data_start.saturating_add(inst.data_offset as usize);
             if inst.exported {
-                if start < doc.data_start + 16 {
-                    return Err(bad("EBX instance", start, "exported instance has no GUID"));
-                }
-                inst.guid.copy_from_slice(&bytes[start - 16..start]);
+                let guid = start
+                    .checked_sub(16)
+                    .filter(|&at| at >= doc.data_start)
+                    .and_then(|at| bytes.get(at..)?.first_chunk::<16>())
+                    .ok_or_else(|| bad("EBX instance", start, "exported instance has no GUID"))?;
+                inst.guid = *guid;
             }
             let size = usize::from(t.size);
-            if size > doc.data_end - start {
+            if size > doc.data_end.saturating_sub(start) {
                 return Err(bad("EBX instance", start, "exceeds EBXD"));
             }
-            inst.raw_image = bytes[start..start + size].to_vec();
+            inst.raw_image = bytes
+                .get(start..start.saturating_add(size))
+                .ok_or_else(|| bad("EBX instance", start, "exceeds the document"))?
+                .to_vec();
             inst.object = Some(v.object(d, start)?);
         }
         let slots = std::mem::take(&mut v.boxed_slots);
@@ -762,19 +834,23 @@ pub fn read(bytes: &[u8]) -> Result<Document> {
     doc.instances = instances;
     // boxed value bytes: up to the next record, the last up to the strings
     doc.boxed_values.sort_by_key(|b| b.offset);
-    for i in 0..doc.boxed_values.len() {
-        let start = doc.boxed_values[i].offset;
-        let end = doc
-            .boxed_values
-            .get(i + 1)
-            .map_or(doc.strings_offset, |b| b.offset);
-        if end < start {
+    let mut boxed = std::mem::take(&mut doc.boxed_values);
+    let ends: Vec<u32> = (boxed.iter().skip(1).map(|b| b.offset))
+        .chain(std::iter::once(doc.strings_offset))
+        .collect();
+    for (b, &end) in boxed.iter_mut().zip(&ends) {
+        let start = b.offset;
+        let Some(len) = end.checked_sub(start) else {
             return Err(bad("EBXX boxed value", start as usize, "records are not ordered"));
-        }
-        validate_data_offset(&doc, start, (end - start) as usize, "EBXX boxed value bytes")?;
-        let raw = doc.payload[start as usize..end as usize].to_vec();
-        doc.boxed_values[i].raw = raw;
+        };
+        validate_data_offset(&doc, start, len as usize, "EBXX boxed value bytes")?;
+        b.raw = doc
+            .payload
+            .get(start as usize..end as usize)
+            .ok_or_else(|| bad("EBXX boxed value", start as usize, "bytes exceed EBXD"))?
+            .to_vec();
     }
+    doc.boxed_values = boxed;
     Ok(doc)
 }
 

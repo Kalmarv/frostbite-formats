@@ -1,11 +1,6 @@
 //! Encoding an EBX document to bytes (ReSkate `ebx_writer.cpp`): instances laid out again from their values
 //! (padding and unread bytes from each instance's image as read), then arrays, boxed values (carried as bytes, with
 //! the arrays and strings they point at), strings (deduplicated, in first-use order) and the fixup tables.
-#![allow(
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-    clippy::cast_possible_truncation
-)] // lint-todo
 use std::collections::BTreeMap;
 
 use super::decode::align_up;
@@ -35,7 +30,16 @@ fn u32_of(v: usize, what: &'static str) -> Result<u32> {
     u32::try_from(v).map_err(|_| bad(W, v, format!("{what} overflows 32 bits")))
 }
 
+/// `x` as the integer type `T`; an error when it does not fit.
+fn narrow<T: TryFrom<i128>>(x: i128) -> Result<T> {
+    T::try_from(x).map_err(|_| bad(W, 0, format!("integer {x} exceeds its field's width")))
+}
+
 /// A value as an integer of the field's width (ReSkate's `number<T>`): out of range is an error.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "a finite float beyond +-2^64 is refused first; the rest fits an i128"
+)]
 fn int(v: Option<&Value>, lo: i128, hi: i128) -> Result<i128> {
     let x = match v {
         Some(Value::Int(i)) => i128::from(*i),
@@ -43,6 +47,9 @@ fn int(v: Option<&Value>, lo: i128, hi: i128) -> Result<i128> {
         Some(Value::Float(f)) => {
             if !f.is_finite() {
                 return Err(bad(W, 0, "floating-point field must be finite"));
+            }
+            if f.abs() >= 18_446_744_073_709_551_616.0 {
+                return Err(bad(W, 0, format!("integer {f} exceeds its field's width")));
             }
             *f as i128
         }
@@ -156,23 +163,38 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    fn grow(&mut self, end: usize) {
+    /// The payload extended with zeros to `end` bytes. Offsets in an EBX document are 32 bits, so a payload past 4 GiB
+    /// is refused.
+    fn grow(&mut self, end: usize) -> Result<()> {
         if end > self.payload.len() {
+            if u32::try_from(end).is_err() {
+                return Err(bad(
+                    W,
+                    end,
+                    "the payload would pass 4 GiB, the largest offset a document stores",
+                ));
+            }
             self.payload.resize(end, 0);
         }
+        Ok(())
     }
-    fn put(&mut self, at: usize, b: &[u8]) {
-        self.grow(at + b.len());
-        self.payload[at..at + b.len()].copy_from_slice(b);
+    fn put(&mut self, at: usize, b: &[u8]) -> Result<()> {
+        let end = at.saturating_add(b.len());
+        self.grow(end)?;
+        self.payload
+            .get_mut(at..end)
+            .ok_or_else(|| bad(W, at, "write past the payload"))?
+            .copy_from_slice(b);
+        Ok(())
     }
-    fn put_u16(&mut self, at: usize, v: u16) {
-        self.put(at, &v.to_le_bytes());
+    fn put_u16(&mut self, at: usize, v: u16) -> Result<()> {
+        self.put(at, &v.to_le_bytes())
     }
-    fn put_u32(&mut self, at: usize, v: u32) {
-        self.put(at, &v.to_le_bytes());
+    fn put_u32(&mut self, at: usize, v: u32) -> Result<()> {
+        self.put(at, &v.to_le_bytes())
     }
-    fn put_u64(&mut self, at: usize, v: u64) {
-        self.put(at, &v.to_le_bytes());
+    fn put_u64(&mut self, at: usize, v: u64) -> Result<()> {
+        self.put(at, &v.to_le_bytes())
     }
 
     fn write_instances(&mut self) -> Result<()> {
@@ -182,23 +204,29 @@ impl<'a> Builder<'a> {
             let ti = inst
                 .descriptor
                 .ok_or_else(|| bad(W, 0, "instance without a type"))?;
-            let t = &doc.types[ti];
+            let t = doc
+                .types
+                .get(ti)
+                .ok_or_else(|| bad(W, ti, "instance type descriptor is invalid"))?;
             let start = align_up(
-                cursor + if inst.exported { 16 } else { 0 },
+                cursor.saturating_add(if inst.exported { 16 } else { 0 }),
                 usize::from(t.alignment).max(1),
             );
             if inst.exported {
-                self.put(start - 16, &inst.guid);
+                let guid_at = start
+                    .checked_sub(16)
+                    .ok_or_else(|| bad(W, start, "exported instance has no room for its GUID"))?;
+                self.put(guid_at, &inst.guid)?;
             }
-            self.grow(start + usize::from(t.size));
+            self.grow(start.saturating_add(usize::from(t.size)))?;
             if !inst.raw_image.is_empty() {
                 let n = inst.raw_image.len().min(usize::from(t.size));
-                self.put(start, &inst.raw_image[..n]);
+                self.put(start, inst.raw_image.get(..n).unwrap_or_default())?;
             }
-            self.put_u16(start, inst.fixup_type);
+            self.put_u16(start, inst.fixup_type)?;
             self.write_type(ti, start, inst.object.as_ref())?;
             self.instance_offsets.push(u32_of(start, "instance offset")?);
-            cursor = start + usize::from(t.size);
+            cursor = start.saturating_add(usize::from(t.size));
         }
         Ok(())
     }
@@ -213,11 +241,14 @@ impl<'a> Builder<'a> {
 
     fn write_type(&mut self, ti: usize, start: usize, object: Option<&'a Object>) -> Result<()> {
         let doc = self.doc;
-        let t = &doc.types[ti];
-        self.grow(start + usize::from(t.size));
+        let t = doc
+            .types
+            .get(ti)
+            .ok_or_else(|| bad(W, start, "type descriptor is invalid"))?;
+        self.grow(start.saturating_add(usize::from(t.size)))?;
         let first = usize::try_from(t.field_index).map_err(|_| bad(W, start, "field range is invalid"))?;
         for k in 0..usize::from(t.field_count) {
-            let di = first + k;
+            let di = first.saturating_add(k);
             let f = doc
                 .fields
                 .get(di)
@@ -229,10 +260,10 @@ impl<'a> Builder<'a> {
                 self.write_type(usize::from(f.class_ref), start, object)?;
                 continue;
             }
-            let position = start + f.data_offset as usize;
+            let position = start.saturating_add(f.data_offset as usize);
             let value = Self::value_for(object, di);
             if f.is_array() {
-                self.grow(position + 8);
+                self.grow(position.saturating_add(8))?;
                 let slot = u32_of(position, "array slot")?;
                 self.pointer_offsets.push(slot);
                 let (values, hash): (&'a [Value], Option<u32>) = match value {
@@ -265,6 +296,10 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "float() refuses a value that does not fit an f32 first"
+    )]
     fn write_scalar(&mut self, f: &FieldDescriptor, position: usize, v: Option<&Value>) -> Result<()> {
         use FieldType::*;
         match f.ty() {
@@ -273,37 +308,37 @@ impl<'a> Builder<'a> {
                     Some(Value::Bool(b)) => u8::from(*b),
                     other => u8::from(int(other, i128::MIN, i128::MAX)? != 0),
                 };
-                self.put(position, &[b]);
+                self.put(position, &[b])?;
             }
-            Int8 => self.put(position, &(int(v, -128, 127)? as i8).to_le_bytes()),
-            UInt8 => self.put(position, &[int(v, 0, 255)? as u8]),
-            Int16 => self.put(position, &(int(v, -32768, 32767)? as i16).to_le_bytes()),
-            UInt16 => self.put_u16(position, int(v, 0, 65535)? as u16),
+            Int8 => self.put(position, &narrow::<i8>(int(v, -128, 127)?)?.to_le_bytes())?,
+            UInt8 => self.put(position, &[narrow::<u8>(int(v, 0, 255)?)?])?,
+            Int16 => self.put(position, &narrow::<i16>(int(v, -32768, 32767)?)?.to_le_bytes())?,
+            UInt16 => self.put_u16(position, narrow(int(v, 0, 65535)?)?)?,
             Int32 | Enumeration => self.put(
                 position,
-                &(int(v, i128::from(i32::MIN), i128::from(i32::MAX))? as i32).to_le_bytes(),
-            ),
-            UInt32 => self.put_u32(position, int(v, 0, i128::from(u32::MAX))? as u32),
+                &narrow::<i32>(int(v, i128::from(i32::MIN), i128::from(i32::MAX))?)?.to_le_bytes(),
+            )?,
+            UInt32 => self.put_u32(position, narrow(int(v, 0, i128::from(u32::MAX))?)?)?,
             Int64 => self.put(
                 position,
-                &(int(v, i128::from(i64::MIN), i128::from(i64::MAX))? as i64).to_le_bytes(),
-            ),
-            UInt64 => self.put_u64(position, int(v, 0, i128::from(u64::MAX))? as u64),
-            Float32 => self.put(position, &(float(v, true)? as f32).to_le_bytes()),
-            Float64 => self.put(position, &float(v, false)?.to_le_bytes()),
+                &narrow::<i64>(int(v, i128::from(i64::MIN), i128::from(i64::MAX))?)?.to_le_bytes(),
+            )?,
+            UInt64 => self.put_u64(position, narrow(int(v, 0, i128::from(u64::MAX))?)?)?,
+            Float32 => self.put(position, &(float(v, true)? as f32).to_le_bytes())?,
+            Float64 => self.put(position, &float(v, false)?.to_le_bytes())?,
             Guid => {
                 let g = match v {
                     Some(Value::Guid(g)) => *g,
                     _ => [0; 16],
                 };
-                self.put(position, &g);
+                self.put(position, &g)?;
             }
             Sha1 => {
                 let s = match v {
                     Some(Value::Sha1(s)) => *s,
                     _ => [0; 20],
                 };
-                self.put(position, &s);
+                self.put(position, &s)?;
             }
             String => {
                 let mut b = [0u8; 32];
@@ -311,12 +346,14 @@ impl<'a> Builder<'a> {
                     if s.len() > 31 {
                         return Err(bad(W, position, "fixed string exceeds 31 bytes"));
                     }
-                    b[..s.len()].copy_from_slice(s);
+                    if let Some(dst) = b.get_mut(..s.len()) {
+                        dst.copy_from_slice(s);
+                    }
                 }
-                self.put(position, &b);
+                self.put(position, &b)?;
             }
             CString | FileRef => {
-                self.put_u64(position, 0);
+                self.put_u64(position, 0)?;
                 let slot = u32_of(position, "string slot")?;
                 self.pointer_offsets.push(slot);
                 let s = match v {
@@ -333,11 +370,11 @@ impl<'a> Builder<'a> {
                     Some(Value::Resource(r)) => *r,
                     _ => 0,
                 };
-                self.put_u64(position, id);
+                self.put_u64(position, id)?;
                 self.resource_offsets.push(u32_of(position, "resource slot")?);
             }
             Pointer => {
-                self.put_u64(position, 0);
+                self.put_u64(position, 0)?;
                 let p = match v {
                     Some(Value::Pointer(p)) => *p,
                     _ => super::Pointer::Null,
@@ -345,32 +382,32 @@ impl<'a> Builder<'a> {
                 self.pointers_pending.push((u32_of(position, "pointer slot")?, p));
             }
             TypeRef | Delegate => {
-                self.grow(position + 8);
+                self.grow(position.saturating_add(8))?;
                 let encoded = match v {
                     Some(Value::TypeRef(t)) => t.encoded,
                     _ => 0,
                 };
-                self.put_u32(position, encoded);
-                self.put_u32(position + 4, 0);
+                self.put_u32(position, encoded)?;
+                self.put_u32(position.saturating_add(4), 0)?;
                 if encoded != 0 && f.ty() == TypeRef {
                     self.type_info_offsets.push(u32_of(position, "type-info slot")?);
                 }
             }
             BoxedValueRef => {
-                self.grow(position + 16);
+                self.grow(position.saturating_add(16))?;
                 match v {
                     Some(Value::Boxed(b)) if b.encoded_type != 0 => {
-                        self.put_u32(position, b.encoded_type);
-                        self.put_u32(position + 4, 0);
+                        self.put_u32(position, b.encoded_type)?;
+                        self.put_u32(position.saturating_add(4), 0)?;
                         self.type_info_offsets.push(u32_of(position, "boxed type slot")?);
                         self.pointer_offsets
-                            .push(u32_of(position + 8, "boxed pointer slot")?);
+                            .push(u32_of(position.saturating_add(8), "boxed pointer slot")?);
                         self.boxes_pending.push((u32_of(position, "boxed slot")?, *b));
                     }
-                    _ => self.put(position, &[0; 16]),
+                    _ => self.put(position, &[0; 16])?,
                 }
             }
-            other => self.grow(position + scalar_size(other)),
+            other => self.grow(position.saturating_add(scalar_size(other)))?,
         }
         Ok(())
     }
@@ -389,7 +426,12 @@ impl<'a> Builder<'a> {
 
     fn element_alignment(&self, f: &FieldDescriptor) -> Result<usize> {
         if f.ty() == FieldType::Structure {
-            return Ok(usize::from(self.doc.types[usize::from(f.class_ref)].alignment).max(1));
+            let t = self
+                .doc
+                .types
+                .get(usize::from(f.class_ref))
+                .ok_or_else(|| bad(W, 0, "array struct type is invalid"))?;
+            return Ok(usize::from(t.alignment).max(1));
         }
         Ok(self.element_stride(f)?.clamp(1, 8))
     }
@@ -399,10 +441,10 @@ impl<'a> Builder<'a> {
         let Some(t) = d.types.get(usize::from(descriptor)) else {
             return 0xFFFF;
         };
-        let n = d.fixup_type_guids.len().min(d.fixup_type_signatures.len());
-        (0..n)
-            .find(|&i| d.fixup_type_guids[i] == t.guid && d.fixup_type_signatures[i] == t.signature)
-            .map_or(0xFFFF, |i| i as u16)
+        (d.fixup_type_guids.iter().zip(&d.fixup_type_signatures))
+            .position(|(guid, signature)| *guid == t.guid && *signature == t.signature)
+            .and_then(|i| u16::try_from(i).ok())
+            .unwrap_or(0xFFFF)
     }
 
     fn array_hash(&self, f: &FieldDescriptor) -> u32 {
@@ -433,24 +475,22 @@ impl<'a> Builder<'a> {
                 }
             }
         }
-        let key = (
-            self.arrays_pending[index].holder,
-            self.arrays_pending[index].descriptor,
-        );
-        let found = self.known_hashes.get(&key).copied();
+        let found = (self.arrays_pending.get(index))
+            .and_then(|p| self.known_hashes.get(&(p.holder, p.descriptor)))
+            .copied();
         found.unwrap_or_else(|| self.array_hash(f))
     }
 
     fn write_arrays(&mut self) -> Result<()> {
         self.arrays_offset = u32_of(align_up(self.payload.len(), 16), "array section")?;
-        self.grow(self.arrays_offset as usize + 32);
-        self.empty_array_target = self.arrays_offset + 16;
-        let mut i = 0;
+        self.grow((self.arrays_offset as usize).saturating_add(32))?;
+        self.empty_array_target = self.arrays_offset.saturating_add(16);
+        let mut i = 0usize;
         while i < self.arrays_pending.len() {
-            if !self.arrays_pending[i].emitted {
+            if self.arrays_pending.get(i).is_some_and(|p| !p.emitted) {
                 self.emit_array(i)?;
             }
-            i += 1;
+            i = i.saturating_add(1);
         }
         self.carry_boxed_arrays()
     }
@@ -459,10 +499,11 @@ impl<'a> Builder<'a> {
         let old = &self.doc.payload;
         let s = slot as usize;
         let disp = old
-            .get(s..s + 4)
-            .map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .get(s..)
+            .and_then(|b| b.first_chunk::<4>())
+            .map(|b| i32::from_le_bytes(*b))
             .ok_or_else(|| bad(W, s, "carried slot lies outside the payload"))?;
-        let target = (i64::from(slot) + i64::from(disp)) as u32;
+        let target = slot.wrapping_add_signed(disp);
         if self.old_arrays.contains_key(&target) {
             return Ok((Target::Array, target));
         }
@@ -470,13 +511,14 @@ impl<'a> Builder<'a> {
             return Ok((Target::Str, target));
         }
         if let Some(&i) = self.old_instances.get(&target) {
-            return Ok((Target::Instance, i as u32));
+            let i = u32::try_from(i).map_err(|_| bad(W, s, "instance index overflows 32 bits"))?;
+            return Ok((Target::Instance, i));
         }
         if self.doc.boxed_values_offset <= target && target < self.doc.strings_offset {
             return Ok((Target::Boxed, target));
         }
         let t = target as usize;
-        if t >= 4 && t <= old.len() && old[t - 4..t] == [0, 0, 0, 0] {
+        if t.checked_sub(4).and_then(|from| old.get(from..t)) == Some(&[0, 0, 0, 0][..]) {
             return Ok((Target::Empty, target));
         }
         Ok((Target::Unknown, target))
@@ -486,7 +528,7 @@ impl<'a> Builder<'a> {
         let mut v: Vec<u32> = offsets
             .iter()
             .copied()
-            .filter(|&o| o >= start && ((o - start) as usize) < length)
+            .filter(|&o| o.checked_sub(start).is_some_and(|d| (d as usize) < length))
             .collect();
         v.sort_unstable();
         v.dedup();
@@ -510,7 +552,7 @@ impl<'a> Builder<'a> {
             for slot in Self::old_slots(src.offset, src.raw.len(), &doc.pointer_offsets) {
                 let (kind, key) = self.old_target(slot)?;
                 if kind == Target::Array {
-                    let rec = self.old_arrays[&key];
+                    let rec = self.old_array(key)?;
                     self.carry_array(rec)?;
                 }
             }
@@ -518,17 +560,27 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
+    /// The array record the document stores at `key`.
+    fn old_array(&self, key: u32) -> Result<ArrayRecord> {
+        self.old_arrays
+            .get(&key)
+            .copied()
+            .ok_or_else(|| bad(W, key as usize, "no array record at the target"))
+    }
+
     fn array_element(&self, rec: &ArrayRecord) -> Result<(usize, usize)> {
         let ty = FieldType::from_bits(((rec.encoded_type >> 1) >> 4) & 0x1F);
         if ty == FieldType::Structure {
             let d = self.doc;
             let slot = usize::from(rec.class_ref);
-            if slot < d.fixup_type_guids.len() && slot < d.fixup_type_signatures.len() {
-                for t in &d.types {
-                    if t.guid == d.fixup_type_guids[slot] && t.signature == d.fixup_type_signatures[slot] {
-                        return Ok((usize::from(t.size).max(1), usize::from(t.alignment).max(1)));
-                    }
-                }
+            if let (Some(guid), Some(signature)) =
+                (d.fixup_type_guids.get(slot), d.fixup_type_signatures.get(slot))
+                && let Some(t) = d
+                    .types
+                    .iter()
+                    .find(|t| t.guid == *guid && t.signature == *signature)
+            {
+                return Ok((usize::from(t.size).max(1), usize::from(t.alignment).max(1)));
             }
             return Err(bad(
                 W,
@@ -545,15 +597,16 @@ impl<'a> Builder<'a> {
             return Ok(());
         }
         let (stride, alignment) = self.array_element(&rec)?;
-        let length = stride * rec.count as usize;
+        let length = stride.saturating_mul(rec.count as usize);
         let from = rec.offset as usize;
-        if from + length > self.doc.payload.len() {
-            return Err(bad(W, from, "carried array exceeds EBXD"));
-        }
-        let data = align_up(self.payload.len() + 4, alignment);
-        self.put_u32(data - 4, rec.count);
         let doc = self.doc;
-        self.put(data, &doc.payload[from..from + length]);
+        let carried = doc
+            .payload
+            .get(from..from.saturating_add(length))
+            .ok_or_else(|| bad(W, from, "carried array exceeds EBXD"))?;
+        let data = align_up(self.payload.len().saturating_add(4), alignment);
+        self.put_u32(data.saturating_sub(4), rec.count)?;
+        self.put(data, carried)?;
         let placed = u32_of(data, "array data")?;
         self.carried.insert(rec.offset, placed);
         self.arrays.push(ArrayRecord {
@@ -565,7 +618,12 @@ impl<'a> Builder<'a> {
 
     fn relocate(&mut self, old_start: u32, length: usize, new_start: usize) -> Result<()> {
         let doc = self.doc;
-        let moved = |old: u32| u32_of(new_start + (old - old_start) as usize, "carried relocation");
+        let moved = |old: u32| {
+            u32_of(
+                new_start.saturating_add(old.saturating_sub(old_start) as usize),
+                "carried relocation",
+            )
+        };
         for o in Self::old_slots(old_start, length, &doc.resource_ref_offsets) {
             self.resource_offsets.push(moved(o)?);
         }
@@ -584,24 +642,35 @@ impl<'a> Builder<'a> {
             let (kind, key) = self.old_target(o)?;
             match kind {
                 Target::Array => {
-                    let rec = self.old_arrays[&key];
+                    let rec = self.old_array(key)?;
                     self.carry_array(rec)?;
-                    let to = self.carried[&key];
-                    self.put_u32(slot as usize, to.wrapping_sub(slot));
+                    let to = *self
+                        .carried
+                        .get(&key)
+                        .ok_or_else(|| bad(W, key as usize, "carried array has no new place"))?;
+                    self.put_u32(slot as usize, to.wrapping_sub(slot))?;
                 }
                 Target::Str => {
                     let src = &doc.payload;
-                    let k = key as usize;
-                    let end = src[k..].iter().position(|&b| b == 0).map_or(src.len(), |n| k + n);
-                    self.strings_pending.push((slot, src[k..end].to_vec()));
+                    let tail = src
+                        .get(key as usize..)
+                        .ok_or_else(|| bad(W, key as usize, "carried string lies outside the payload"))?;
+                    let text = tail.split(|&b| b == 0).next().unwrap_or_default();
+                    self.strings_pending.push((slot, text.to_vec()));
                 }
                 Target::Instance => {
-                    let to = self.instance_offsets[key as usize];
-                    self.put_u32(slot as usize, to.wrapping_sub(slot));
+                    let to = *self.instance_offsets.get(key as usize).ok_or_else(|| {
+                        bad(
+                            W,
+                            key as usize,
+                            "carried pointer names an instance that was not written",
+                        )
+                    })?;
+                    self.put_u32(slot as usize, to.wrapping_sub(slot))?;
                 }
                 Target::Empty => {
                     let to = self.empty_array_target;
-                    self.put_u32(slot as usize, to.wrapping_sub(slot));
+                    self.put_u32(slot as usize, to.wrapping_sub(slot))?;
                 }
                 Target::Boxed => self.boxed_targets.push((slot, key)),
                 Target::Unknown => {}
@@ -611,26 +680,32 @@ impl<'a> Builder<'a> {
     }
 
     fn emit_array(&mut self, index: usize) -> Result<()> {
-        self.arrays_pending[index].emitted = true;
-        let slot = self.arrays_pending[index].slot;
-        let values = self.arrays_pending[index].values;
-        let descriptor = self.arrays_pending[index].descriptor;
+        let pending = self
+            .arrays_pending
+            .get_mut(index)
+            .ok_or_else(|| bad(W, index, "pending array is missing"))?;
+        pending.emitted = true;
+        let (slot, values, descriptor, stored_hash) =
+            (pending.slot, pending.values, pending.descriptor, pending.hash);
         let doc = self.doc;
-        let f = &doc.fields[descriptor];
+        let f = doc
+            .fields
+            .get(descriptor)
+            .ok_or_else(|| bad(W, descriptor, "array field descriptor is invalid"))?;
         if values.is_empty() {
             let to = self.empty_array_target;
-            self.put_u32(slot as usize, to.wrapping_sub(slot));
+            self.put_u32(slot as usize, to.wrapping_sub(slot))?;
             return Ok(());
         }
-        let data = align_up(self.payload.len() + 4, self.element_alignment(f)?);
+        let data = align_up(self.payload.len().saturating_add(4), self.element_alignment(f)?);
         let stride = self.element_stride(f)?;
         let count = u32_of(values.len(), "array count")?;
-        self.put_u32(data - 4, count);
-        self.grow(data + stride * values.len());
-        self.put_u32(slot as usize, (data as u32).wrapping_sub(slot));
+        self.put_u32(data.saturating_sub(4), count)?;
+        self.grow(crate::at(data, values.len(), stride))?;
+        self.put_u32(slot as usize, u32_of(data, "array data")?.wrapping_sub(slot))?;
         let first_child = self.arrays_pending.len();
         for (e, value) in values.iter().enumerate() {
-            let at = data + e * stride;
+            let at = crate::at(data, e, stride);
             if f.ty() == FieldType::Structure {
                 let o = match value {
                     Value::Object(o) => Some(o.as_ref()),
@@ -641,7 +716,7 @@ impl<'a> Builder<'a> {
                 self.write_scalar(f, at, Some(value))?;
             }
         }
-        let hash = match self.arrays_pending[index].hash {
+        let hash = match stored_hash {
             Some(h) => h,
             None => self.new_array_hash(index, f),
         };
@@ -659,10 +734,10 @@ impl<'a> Builder<'a> {
         });
         let mut child = first_child;
         while child < self.arrays_pending.len() {
-            if !self.arrays_pending[child].emitted {
+            if self.arrays_pending.get(child).is_some_and(|p| !p.emitted) {
                 self.emit_array(child)?;
             }
-            child += 1;
+            child = child.saturating_add(1);
         }
         Ok(())
     }
@@ -670,7 +745,7 @@ impl<'a> Builder<'a> {
     fn write_boxed_values(&mut self) -> Result<()> {
         let doc = self.doc;
         self.boxed_offset = u32_of(align_up(self.payload.len(), 16), "boxed section")?;
-        self.grow(self.boxed_offset as usize);
+        self.grow(self.boxed_offset as usize)?;
         let mut moved: BTreeMap<u32, u32> = BTreeMap::new();
         let mut records: Vec<&BoxedValueRecord> = doc.boxed_values.iter().collect();
         records.sort_by_key(|b| b.offset);
@@ -678,8 +753,9 @@ impl<'a> Builder<'a> {
             if src.offset < doc.boxed_values_offset {
                 return Err(bad(W, src.offset as usize, "boxed record precedes its section"));
             }
-            let offset = self.boxed_offset as usize + (src.offset - doc.boxed_values_offset) as usize;
-            self.put(offset, &src.raw);
+            let offset = (self.boxed_offset as usize)
+                .saturating_add(src.offset.saturating_sub(doc.boxed_values_offset) as usize);
+            self.put(offset, &src.raw)?;
             self.relocate(src.offset, src.raw.len(), offset)?;
             let at = u32_of(offset, "boxed value")?;
             moved.insert(src.offset, at);
@@ -689,17 +765,19 @@ impl<'a> Builder<'a> {
             });
         }
         for (slot, target) in std::mem::take(&mut self.boxed_targets) {
-            let to = self.boxed_offset + (target - doc.boxed_values_offset);
-            self.put_u32(slot as usize, to.wrapping_sub(slot));
+            let to = self
+                .boxed_offset
+                .wrapping_add(target.wrapping_sub(doc.boxed_values_offset));
+            self.put_u32(slot as usize, to.wrapping_sub(slot))?;
         }
         for (slot, b) in self.boxes_pending.clone() {
-            self.put_u32(slot as usize, b.encoded_type);
-            self.put_u32(slot as usize + 4, 0);
+            self.put_u32(slot as usize, b.encoded_type)?;
+            self.put_u32((slot as usize).saturating_add(4), 0)?;
             let rel = match u32::try_from(b.data_offset).ok().and_then(|o| moved.get(&o)) {
-                Some(&to) => i64::from(to) - i64::from(slot + 8),
+                Some(&to) => i64::from(to).saturating_sub(i64::from(slot).saturating_add(8)),
                 None => b.relative_offset,
             };
-            self.put(slot as usize + 8, &rel.to_le_bytes());
+            self.put((slot as usize).saturating_add(8), &rel.to_le_bytes())?;
         }
         Ok(())
     }
@@ -712,15 +790,15 @@ impl<'a> Builder<'a> {
                 None => {
                     let o = u32_of(self.payload.len(), "string table")?;
                     let end = self.payload.len();
-                    self.put(end, &s);
+                    self.put(end, &s)?;
                     let end = self.payload.len();
-                    self.grow(end + 1);
+                    self.grow(end.saturating_add(1))?;
                     offsets.insert(s, o);
                     o
                 }
             };
-            self.put_u32(slot as usize, at.wrapping_sub(slot));
-            self.put_u32(slot as usize + 4, 0);
+            self.put_u32(slot as usize, at.wrapping_sub(slot))?;
+            self.put_u32((slot as usize).saturating_add(4), 0)?;
         }
         Ok(())
     }
@@ -734,18 +812,18 @@ impl<'a> Builder<'a> {
                         .instance_offsets
                         .get(i)
                         .ok_or_else(|| bad(W, slot as usize, "internal pointer index is invalid"))?;
-                    self.put_u32(slot as usize, to.wrapping_sub(slot));
+                    self.put_u32(slot as usize, to.wrapping_sub(slot))?;
                     self.pointer_offsets.push(slot);
                 }
                 Pointer::External(i) => {
                     if i >= self.doc.imports.len() {
                         return Err(bad(W, slot as usize, "import pointer index is invalid"));
                     }
-                    self.put_u32(slot as usize, (u32_of(i, "import index")? << 1) | 1);
+                    self.put_u32(slot as usize, (u32_of(i, "import index")? << 1) | 1)?;
                     self.import_offsets.push(slot);
                 }
             }
-            self.put_u32(slot as usize + 4, 0);
+            self.put_u32((slot as usize).saturating_add(4), 0)?;
         }
         Ok(())
     }
@@ -796,7 +874,7 @@ impl<'a> Builder<'a> {
         for &old in &d.boxed_reference_offsets {
             if let Ok(i) = old_slots.binary_search(&old) {
                 // the first of equal slots, as lower_bound finds it
-                let i = old_slots[..=i].partition_point(|&s| s < old);
+                let i = old_slots.get(..=i).map_or(0, |s| s.partition_point(|&s| s < old));
                 if let Some(&n) = new_slots.get(i) {
                     trailing.push(n);
                 }
@@ -833,8 +911,14 @@ impl<'a> Builder<'a> {
 
     fn write_riff(&self, payload: &[u8], fixup: &[u8], extra: &[u8]) -> Result<Vec<u8>> {
         let d = self.doc;
-        let mut w =
-            Vec::with_capacity(payload.len() + fixup.len() + extra.len() + d.reflection_data.len() + 64);
+        let mut w = Vec::with_capacity(
+            payload
+                .len()
+                .saturating_add(fixup.len())
+                .saturating_add(extra.len())
+                .saturating_add(d.reflection_data.len())
+                .saturating_add(64),
+        );
         w.extend(b"RIFF");
         w.extend([0; 4]);
         w.extend(if d.serialized_layout { b"EBXS" } else { b"EBX\0" });
@@ -861,8 +945,10 @@ impl<'a> Builder<'a> {
             },
             &d.reflection_data,
         )?;
-        let size = u32_of(w.len() - 8, "RIFF size")?;
-        w[4..8].copy_from_slice(&size.to_le_bytes());
+        let size = u32_of(w.len().saturating_sub(8), "RIFF size")?;
+        if let Some(slot) = w.get_mut(4..8) {
+            slot.copy_from_slice(&size.to_le_bytes());
+        }
         Ok(w)
     }
 }

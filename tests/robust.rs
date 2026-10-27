@@ -173,3 +173,16 @@ fn a_toc_error_offset_counts_the_envelope() {
         "{e}"
     );
 }
+
+/// Raw CAS blocks that claim 16 MiB each and hold nothing: the decoded size the headers add up to is refused before a
+/// buffer of it is reserved (200 headers of 8 bytes would otherwise reserve and zero 3 GiB).
+#[test]
+fn raw_cas_blocks_claiming_more_than_they_hold_are_refused_before_allocation() {
+    use frostbite_formats::cas::Cas;
+    use primase_foundations::compress::Decompressor;
+    let block = [0u8, 0xFF, 0xFF, 0xFF, 0, 0x70, 0, 0];
+    let stream: Vec<u8> = block.iter().copied().cycle().take(8 * 200).collect();
+    let claimed = 200 * 0x00FF_FFFF;
+    let e = Cas { oodle: None }.decompress(&stream, claimed).unwrap_err();
+    assert!(e.to_string().contains("size"), "{e}");
+}

@@ -1,11 +1,6 @@
 //! Frostbite CAS: a sequence of blocks, each an eight-byte header and an exactly sized payload ([`blocks`]), and the
 //! codec that decodes a stream of them to its bytes ([`Cas`]), the Oodle blocks through the caller's handle to the
 //! game's library.
-#![allow(
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-    clippy::cast_possible_truncation
-)] // lint-todo
 use primase_foundations::compress::{Compressor, Decompressor, Error, Result, Zlib, oodle::Oodle};
 
 pub(crate) fn invalid(offset: usize, detail: impl ToString) -> Error {
@@ -50,32 +45,40 @@ pub fn blocks(input: &[u8]) -> Result<Vec<Block<'_>>> {
     let mut pos = 0;
     while pos < input.len() {
         let start = pos;
-        let h = input
-            .get(pos..pos + 8)
-            .ok_or_else(|| invalid(pos, "short header"))?;
-        if h[0] != 0 || h[4] & 0x80 != 0 {
-            return Err(invalid(pos, "dictionary/reserved flag unsupported"));
+        let &[flag, d1, d2, d3, kind, s1, s2, s3] = input
+            .get(pos..)
+            .and_then(|rest| rest.first_chunk::<8>())
+            .ok_or_else(|| invalid(pos, "short header: expected 8 bytes"))?;
+        if flag != 0 || kind & 0x80 != 0 {
+            return Err(invalid(
+                pos,
+                "dictionary/reserved flag unsupported: expected byte 0 and the top bit of byte 4 clear",
+            ));
         }
-        let decoded_size = (usize::from(h[1]) << 16) | (usize::from(h[2]) << 8) | usize::from(h[3]);
-        let size = (usize::from(h[5] & 15) << 16) | (usize::from(h[6]) << 8) | usize::from(h[7]);
-        pos += 8;
+        let decoded_size = (usize::from(d1) << 16) | (usize::from(d2) << 8) | usize::from(d3);
+        let size = (usize::from(s1 & 15) << 16) | (usize::from(s2) << 8) | usize::from(s3);
+        pos = pos.saturating_add(8);
         let payload = input
-            .get(pos..pos + size)
-            .ok_or_else(|| invalid(pos, "short payload"))?;
+            .get(pos..)
+            .and_then(|rest| rest.get(..size))
+            .ok_or_else(|| invalid(pos, format!("short payload: expected {size} bytes")))?;
         out.push(Block {
             offset: start,
-            kind: h[4],
+            kind,
             decoded_size,
             payload,
         });
-        pos += size;
+        pos = pos.saturating_add(size);
     }
     Ok(out)
 }
 pub(crate) fn append(out: &mut Vec<u8>, decoded: usize, kind: u8, payload: &[u8]) {
-    out.extend_from_slice(&(decoded as u32).to_be_bytes());
-    out.extend_from_slice(&[kind, 0x70 | ((payload.len() >> 16) as u8)]);
-    out.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+    // a block holds at most 64 KiB decoded and the stored size takes 20 bits: both fit the fields (the callers cut the
+    // input into 64 KiB parts), and a larger value keeps its low bits as the format does
+    out.extend_from_slice(&u32::try_from(decoded).unwrap_or(u32::MAX).to_be_bytes());
+    let [.., high, mid, low] = u64::try_from(payload.len()).unwrap_or(u64::MAX).to_be_bytes();
+    out.extend_from_slice(&[kind, 0x70 | (high & 0x0F)]);
+    out.extend_from_slice(&[mid, low]);
     out.extend_from_slice(payload);
 }
 /// Encode raw 64 KiB blocks, including one empty raw block for empty input.
@@ -108,10 +111,24 @@ impl Decompressor for Cas<'_> {
             .iter()
             .try_fold(0usize, |s, b| s.checked_add(b.decoded_size).ok_or(Error::Limit))?;
         check_size(total, expected)?;
+        // a raw block is stored as it decodes: a header that claims more than its payload holds is refused before
+        // anything is reserved
+        if let Some(b) = blocks
+            .iter()
+            .find(|b| b.kind == 0 && b.payload.len() != b.decoded_size)
+        {
+            return Err(Error::Size {
+                expected: b.decoded_size,
+                actual: b.payload.len(),
+            });
+        }
         let mut out = buffer(expected)?;
-        let mut pos = 0;
+        let mut rest = out.as_mut_slice();
         for b in blocks {
-            let dst = &mut out[pos..pos + b.decoded_size];
+            let (dst, after) = std::mem::take(&mut rest)
+                .split_at_mut_checked(b.decoded_size)
+                .ok_or_else(|| invalid(b.offset, "block decodes past the stream's decoded size"))?;
+            rest = after;
             match b.kind {
                 0 => {
                     check_size(b.payload.len(), b.decoded_size)?;
@@ -136,7 +153,6 @@ impl Decompressor for Cas<'_> {
                     return Err(invalid(b.offset, format!("unsupported kind {:#x}", b.kind)));
                 }
             }
-            pos += b.decoded_size;
         }
         Ok(out)
     }

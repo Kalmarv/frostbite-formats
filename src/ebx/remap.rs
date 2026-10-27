@@ -4,11 +4,6 @@
 //! it: the file GUID, instance GUIDs, import references, GUID values, and the bytes the document carries as read
 //! (instance images, boxed values, the payload), so a GUID inside a value the reader does not decode follows too.
 //! GUIDs outside the map (type GUIDs, references to other documents) stay.
-#![allow(
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-    clippy::cast_possible_truncation
-)] // lint-todo
 use std::collections::HashMap;
 
 use super::{Document, Value};
@@ -48,34 +43,36 @@ pub fn values(doc: &mut Document) -> Vec<[u8; 16]> {
 
 /// Replaces every 16-byte run of `bytes` that is a key of `map` with its value; how many.
 fn replace_bytes(bytes: &mut [u8], map: &HashMap<[u8; 16], [u8; 16]>) -> usize {
-    let mut n = 0;
-    let mut at = 0;
-    while at + 16 <= bytes.len() {
-        let w: [u8; 16] = bytes[at..at + 16].try_into().unwrap_or_default();
+    let mut n = 0usize;
+    let mut at = 0usize;
+    while let Some(window) = bytes.get_mut(at..at.saturating_add(16)) {
+        let Ok(w) = <[u8; 16]>::try_from(&*window) else {
+            break;
+        };
         match map.get(&w) {
             Some(new) => {
-                bytes[at..at + 16].copy_from_slice(new);
-                n += 1;
-                at += 16;
+                window.copy_from_slice(new);
+                n = n.saturating_add(1);
+                at = at.saturating_add(16);
             }
-            None => at += 1,
+            None => at = at.saturating_add(1),
         }
     }
     n
 }
 
 fn object_id(guid: &[u8; 16]) -> u32 {
-    u32::from_le_bytes([guid[0], guid[1], guid[2], guid[3]])
+    guid.first_chunk::<4>().map_or(0, |id| u32::from_le_bytes(*id))
 }
 
 /// Gives every GUID of `doc` that is a key of `map` its value (the module documentation's places). An exported
 /// instance whose `Flags` held its old GUID's object id gets the new one's. How many places changed.
 pub fn remap(doc: &mut Document, map: &HashMap<[u8; 16], [u8; 16]>) -> usize {
-    let mut n = 0;
+    let mut n = 0usize;
     let mut swap = |g: &mut [u8; 16]| {
         if let Some(new) = map.get(g) {
             *g = *new;
-            n += 1;
+            n = n.saturating_add(1);
         }
     };
     swap(&mut doc.file_guid);
@@ -96,12 +93,12 @@ pub fn remap(doc: &mut Document, map: &HashMap<[u8; 16], [u8; 16]>) -> usize {
         }
     }
     for inst in &mut doc.instances {
-        n += replace_bytes(&mut inst.raw_image, map);
+        n = n.saturating_add(replace_bytes(&mut inst.raw_image, map));
     }
     for b in &mut doc.boxed_values {
-        n += replace_bytes(&mut b.raw, map);
+        n = n.saturating_add(replace_bytes(&mut b.raw, map));
     }
-    n + replace_bytes(&mut doc.payload, map)
+    n.saturating_add(replace_bytes(&mut doc.payload, map))
 }
 
 /// The object id in `Flags` follows the instance's GUID, when it was the old GUID's.
@@ -110,9 +107,13 @@ fn renumber(obj: &mut super::Object, old: &[u8; 16], new: &[u8; 16]) {
         return;
     };
     let current = match f.value {
-        Value::Int(i) => i as u32,
-        Value::UInt(u) => u as u32,
-        _ => return,
+        // `Flags` is a 32-bit word; an `Int` holds it sign-extended
+        Value::Int(i) => i32::try_from(i).ok().map(i32::cast_unsigned),
+        Value::UInt(u) => u32::try_from(u).ok(),
+        _ => None,
+    };
+    let Some(current) = current else {
+        return;
     };
     if current & OBJECT_ID_MASK != object_id(old) & OBJECT_ID_MASK {
         return;

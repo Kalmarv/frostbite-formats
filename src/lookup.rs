@@ -1,11 +1,6 @@
 //! The shader lookup tables of `dingolevel_root`: material key -> program indices (program lookup, type 0xE2E6955B,
 //! after the program records) and material key -> streamable texture set (type 0x2D254A89). Rows are a map: the first
 //! row of a repeated key wins, as the game's reader appends.
-#![allow(
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-    clippy::cast_possible_truncation
-)] // lint-todo
 
 use std::collections::BTreeMap;
 
@@ -29,27 +24,48 @@ pub struct ProgramLookup {
 /// no programs or of more than 4096, a repeated key, data after the last row.
 pub fn read_programs(d: &[u8], meta: &[u8; 16]) -> Result<ProgramLookup> {
     let m = Rd::new(meta, "program lookup meta");
-    let (program, reloc, lookup) = (m.u32le(0)? as usize, m.u32le(4)? as usize, m.u32le(8)? as usize);
-    let start = program + reloc;
-    if start > d.len() || lookup < 4 || lookup != d.len() - start {
-        return Err(bad("program lookup", 0, "metadata does not match the payload"));
+    let (program, reloc, lookup) = (m.size32le(0)?, m.size32le(4)?, m.size32le(8)?);
+    let start = program.saturating_add(reloc);
+    let (head, rows) = d.split_at_checked(start).ok_or_else(|| {
+        bad(
+            "program lookup",
+            0,
+            "metadata does not match the payload: the program and relocation sizes pass the end",
+        )
+    })?;
+    if lookup < 4 || lookup != rows.len() {
+        return Err(bad(
+            "program lookup",
+            0,
+            format!(
+                "metadata does not match the payload: expected {lookup} bytes of rows (at least 4), found {}",
+                rows.len()
+            ),
+        ));
     }
     let r = Rd::new(d, "program lookup");
-    let count = r.u32le(start)? as usize;
-    let mut pos = start + 4;
+    let count = r.size32le(start)?;
+    let mut pos = start.saturating_add(4);
     let mut out = ProgramLookup {
-        head: d[..start].to_vec(),
+        head: head.to_vec(),
         rows: BTreeMap::new(),
-        order: Vec::with_capacity(capacity("program lookup", count, 12, d.len() - start - 4)?),
+        order: Vec::with_capacity(capacity(
+            "program lookup",
+            count,
+            12,
+            rows.len().saturating_sub(4),
+        )?),
     };
     for _ in 0..count {
-        let (key, n) = (r.u64le(pos)?, r.u32le(pos + 8)? as usize);
-        pos += 12;
+        let (key, n) = (r.u64le(pos)?, r.size32le(pos.saturating_add(8))?);
+        pos = pos.saturating_add(12);
         if n == 0 || n > 4096 {
             return Err(bad("program lookup", pos, format!("row of {n} programs")));
         }
-        let row = (0..n).map(|i| r.u32le(pos + 4 * i)).collect::<Result<Vec<_>>>()?;
-        pos += 4 * n;
+        let row = (0..n)
+            .map(|i| r.u32le(crate::at(pos, i, 4)))
+            .collect::<Result<Vec<_>>>()?;
+        pos = crate::at(pos, n, 4);
         if out.rows.contains_key(&key) {
             return Err(bad("program lookup", pos, format!("repeated key {key:016x}")));
         }
@@ -64,24 +80,28 @@ pub fn read_programs(d: &[u8], meta: &[u8; 16]) -> Result<ProgramLookup> {
 
 /// The payload and metadata (only the rows' length changes) of a program lookup; rows in `order`, then any new keys
 /// sorted.
-pub fn write_programs(t: &ProgramLookup, meta: &[u8; 16]) -> (Vec<u8>, [u8; 16]) {
+pub fn write_programs(t: &ProgramLookup, meta: &[u8; 16]) -> Result<(Vec<u8>, [u8; 16])> {
+    const W: &str = "program lookup";
     let mut keys = t.order.clone();
     let mut extra: Vec<u64> = t.rows.keys().copied().filter(|k| !t.order.contains(k)).collect();
     keys.retain(|k| t.rows.contains_key(k));
     keys.append(&mut extra);
     let mut out = t.head.clone();
-    out.extend((keys.len() as u32).to_le_bytes());
+    out.extend(crate::u32_len(W, keys.len())?.to_le_bytes());
     for k in keys {
-        let row = &t.rows[&k];
+        let row = t.rows.get(&k).map(Vec::as_slice).unwrap_or_default();
         out.extend(k.to_le_bytes());
-        out.extend((row.len() as u32).to_le_bytes());
+        out.extend(crate::u32_len(W, row.len())?.to_le_bytes());
         for p in row {
             out.extend(p.to_le_bytes());
         }
     }
     let mut m = *meta;
-    m[8..12].copy_from_slice(&((out.len() - t.head.len()) as u32).to_le_bytes());
-    (out, m)
+    let rows_len = crate::u32_len(W, out.len().saturating_sub(t.head.len()))?;
+    if let Some(slot) = m.get_mut(8..12) {
+        slot.copy_from_slice(&rows_len.to_le_bytes());
+    }
+    Ok((out, m))
 }
 
 /// Streamable texture set rows (u64 key, u64 value), in stored order.
@@ -91,7 +111,7 @@ pub fn read_texture_sets(d: &[u8]) -> Result<Vec<(u64, u64)>> {
     }
     let r = Rd::new(d, "texture set lookup");
     (0..d.len() / 16)
-        .map(|i| Ok((r.u64le(16 * i)?, r.u64le(16 * i + 8)?)))
+        .map(|i| Ok((r.u64le(crate::at(0, i, 16))?, r.u64le(crate::at(8, i, 16))?)))
         .collect()
 }
 
@@ -120,13 +140,13 @@ pub struct ProgramRecord {
 /// program section the metadata states.
 pub fn read_records(d: &[u8], meta: &[u8; 16]) -> Result<Vec<ProgramRecord>> {
     let m = Rd::new(meta, "program lookup meta");
-    let program = m.u32le(0)? as usize;
+    let program = m.size32le(0)?;
     let r = Rd::new(
         d.get(..program)
             .ok_or_else(|| bad("program records", 0, "metadata does not match the payload"))?,
         "program records",
     );
-    let (count, first) = (r.u32le(0)? as usize, r.u64le(4)? as usize);
+    let (count, first) = (r.size32le(0)?, r.offset64le(4)?);
     count
         .checked_mul(RECORD_LEN)
         .and_then(|n| n.checked_add(first))
@@ -140,8 +160,11 @@ pub fn read_records(d: &[u8], meta: &[u8; 16]) -> Result<Vec<ProgramRecord>> {
         })?;
     (0..count)
         .map(|i| {
-            let at = first + i * RECORD_LEN;
-            let (n, ptr) = (r.u32le(at + 0x60)? as usize, r.u64le(at + 0x64)? as usize);
+            let at = crate::at(first, i, RECORD_LEN);
+            let (n, ptr) = (
+                r.size32le(at.saturating_add(0x60))?,
+                r.offset64le(at.saturating_add(0x64))?,
+            );
             // the whole array lies in the section before any id is read
             r.bytes(
                 ptr,
@@ -150,7 +173,9 @@ pub fn read_records(d: &[u8], meta: &[u8; 16]) -> Result<Vec<ProgramRecord>> {
             )?;
             Ok(ProgramRecord {
                 key: r.u64le(at)?,
-                permutations: (0..n).map(|j| r.u64le(ptr + 8 * j)).collect::<Result<_>>()?,
+                permutations: (0..n)
+                    .map(|j| r.u64le(crate::at(ptr, j, 8)))
+                    .collect::<Result<_>>()?,
                 raw: r.arr::<RECORD_LEN>(at)?,
             })
         })

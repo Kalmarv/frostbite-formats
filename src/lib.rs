@@ -248,6 +248,16 @@ impl<'a> Rd<'a> {
     pub fn u64le(&self, at: usize) -> Result<u64> {
         self.number(at, Endian::Little, primase_foundations::bytes::View::u64)
     }
+    /// The little-endian `u32` at `at` as a size or count.
+    pub fn size32le(&self, at: usize) -> Result<usize> {
+        let v = self.u32le(at)?;
+        usize::try_from(v).map_err(|_| bad(self.what, at, format!("{v:#x} does not fit the address space")))
+    }
+    /// The little-endian `u64` at `at` as an offset or size.
+    pub fn offset64le(&self, at: usize) -> Result<usize> {
+        let v = self.u64le(at)?;
+        usize::try_from(v).map_err(|_| bad(self.what, at, format!("{v:#x} does not fit the address space")))
+    }
     /// The big-endian `u32` at `at`.
     pub fn u32be(&self, at: usize) -> Result<u32> {
         self.number(at, Endian::Big, primase_foundations::bytes::View::u32)
@@ -306,6 +316,17 @@ pub fn capacity(what: &'static str, count: usize, min_bytes: usize, remaining: u
             format!("{count} entries of at least {min_bytes} bytes in {remaining} bytes"),
         )),
     }
+}
+
+/// `n` as the `u32` a format stores a count or size in; an error naming `what` when it does not fit.
+pub fn u32_len(what: &'static str, n: usize) -> Result<u32> {
+    u32::try_from(n).map_err(|_| {
+        bad(
+            what,
+            0,
+            format!("{n} does not fit the 32-bit field it is stored in"),
+        )
+    })
 }
 
 /// The offset of record `index` of a table at `base` whose records take `stride` bytes. Saturating: an offset past the

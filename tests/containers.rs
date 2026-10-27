@@ -207,7 +207,7 @@ fn synthetic_program_lookup_round_trip() -> R {
     meta[8..12].copy_from_slice(&((d.len() - 24) as u32).to_le_bytes());
     let t = lookup::read_programs(&d, &meta)?;
     assert_eq!(t.rows[&1], vec![5, 6]);
-    assert_eq!(lookup::write_programs(&t, &meta), (d, meta));
+    assert_eq!(lookup::write_programs(&t, &meta)?, (d, meta));
     Ok(())
 }
 

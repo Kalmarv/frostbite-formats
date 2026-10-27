@@ -44,11 +44,6 @@
 //! prefix not guessed. What the values themselves show: in a block a texture parameter's name hash carries the
 //! texture slot in its top 16 bits ([`crate::depot`]), so a name is that tag over 48 bits of something. The binding
 //! does not need the names: it is keyed by the hashes.
-#![allow(
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-    clippy::cast_possible_truncation
-)] // lint-todo
 
 use crate::lookup::RECORD_LEN;
 use crate::{Rd, Result, bad};
@@ -115,6 +110,10 @@ pub enum WalkError {
     /// The node tests the option, and the value is not one of its entries.
     #[error("option {option} has no entry for the value {value:#018x} at node {node}")]
     NoEdge { node: usize, option: usize, value: u64 },
+    /// The tree is not one [`Selector::read`] returns: a node that does not exist, an option past the values, or a
+    /// cycle.
+    #[error("the tree is malformed at node {node}")]
+    Malformed { node: usize },
 }
 
 /// A program record's selector, read and checked ([`Selector::read`]).
@@ -133,8 +132,14 @@ impl Selector {
     pub fn read(section: &[u8], record: &[u8; RECORD_LEN]) -> Result<Self> {
         let head = Rd::new(record, "program record");
         let place = |at: usize| -> Result<(usize, usize)> {
-            let ptr = usize::try_from(head.u64le(at + 4)?).map_err(|_| bad(W, at, "pointer out of range"))?;
-            Ok((head.u32le(at)? as usize, ptr))
+            let ptr = head.offset64le(at.saturating_add(4)).map_err(|_| {
+                bad(
+                    W,
+                    at,
+                    "pointer out of range: expected an offset that fits the address space",
+                )
+            })?;
+            Ok((head.size32le(at)?, ptr))
         };
         let array = |at: usize, size: usize| -> Result<Rd<'_>> {
             let (n, ptr) = place(at)?;
@@ -175,12 +180,12 @@ impl Selector {
         );
         let options = (0..n_options)
             .map(|i| {
-                let at = i * 16;
+                let at = crate::at(0, i, 16);
                 Ok(SelectorOption {
                     name: opts.u64le(at)?,
-                    kind: opts.u32le(at + 8)?,
-                    count: opts.u16le(at + 12)?,
-                    extra: opts.u16le(at + 14)?,
+                    kind: opts.u32le(crate::at(at, 2, 4))?,
+                    count: opts.u16le(crate::at(at, 12, 1))?,
+                    extra: opts.u16le(crate::at(at, 14, 1))?,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -188,11 +193,11 @@ impl Selector {
         let mut tree = Vec::with_capacity(n_nodes);
         let mut next = 0usize;
         for i in 0..n_nodes {
-            let at = i * 6;
+            let at = crate::at(0, i, 6);
             let (k, start, len) = (
-                nodes.u16le(at)? as usize,
-                nodes.u16le(at + 2)? as usize,
-                nodes.u16le(at + 4)? as usize,
+                usize::from(nodes.u16le(at)?),
+                usize::from(nodes.u16le(crate::at(at, 2, 1))?),
+                usize::from(nodes.u16le(crate::at(at, 4, 1))?),
             );
             if start != next || len == 0 {
                 return Err(bad(
@@ -210,8 +215,8 @@ impl Selector {
             }
             let mut edges: Vec<Edge> = Vec::with_capacity(len);
             for j in start..next {
-                let value = values.u64le(j * 8)?;
-                let entry = entries.u16le(j * 2)?;
+                let value = values.u64le(crate::at(0, j, 8))?;
+                let entry = entries.u16le(crate::at(0, j, 2))?;
                 if edges.iter().any(|e| e.value == value) {
                     return Err(bad(
                         W,
@@ -234,8 +239,15 @@ impl Selector {
                 format!("the nodes cover {next} of {n_entries} entries"),
             ));
         }
-        if tree[0].option != 0 {
-            return Err(bad(W, NODES, format!("the root tests option {}", tree[0].option)));
+        let root = tree
+            .first()
+            .ok_or_else(|| bad(W, NODES, "no nodes: expected a root that tests option 0"))?;
+        if root.option != 0 {
+            return Err(bad(
+                W,
+                NODES,
+                format!("the root tests option {}, expected 0", root.option),
+            ));
         }
         // a tree: every node but the root is some earlier option's child once; each permutation is a leaf once
         let mut named = vec![0usize; n_nodes];
@@ -257,10 +269,12 @@ impl Selector {
                                 ),
                             ));
                         }
-                        named[c] += 1;
+                        if let Some(n) = named.get_mut(c) {
+                            *n = n.saturating_add(1);
+                        }
                     }
                     Target::Permutation(p) => match ended.get_mut(p) {
-                        Some(n) => *n += 1,
+                        Some(n) => *n = n.saturating_add(1),
                         None => {
                             return Err(bad(
                                 W,
@@ -272,14 +286,18 @@ impl Selector {
                 }
             }
         }
-        if let Some(i) = (1..n_nodes).find(|&i| named[i] != 1) {
-            return Err(bad(W, NODES, format!("node {i} is led to {} times", named[i])));
-        }
-        if let Some(p) = ended.iter().position(|&n| n != 1) {
+        if let Some((i, n)) = named.iter().enumerate().skip(1).find(|&(_, &n)| n != 1) {
             return Err(bad(
                 W,
                 NODES,
-                format!("permutation {p} is ended at {} times", ended[p]),
+                format!("node {i} is led to {n} times, expected once"),
+            ));
+        }
+        if let Some((p, n)) = ended.iter().enumerate().find(|&(_, &n)| n != 1) {
+            return Err(bad(
+                W,
+                NODES,
+                format!("permutation {p} is ended at {n} times, expected once"),
             ));
         }
         Ok(Self {
@@ -303,9 +321,10 @@ impl Selector {
             return Ok(0);
         }
         let mut at = 0;
-        loop {
-            let node = &self.nodes[at];
-            let value = values[node.option];
+        // a tree read by `Selector::read` is acyclic; the bound refuses a hand-built cycle
+        for _ in 0..=self.nodes.len() {
+            let node = self.nodes.get(at).ok_or(WalkError::Malformed { node: at })?;
+            let value = *values.get(node.option).ok_or(WalkError::Malformed { node: at })?;
             match node.edges.iter().find(|e| e.value == value).map(|e| e.to) {
                 Some(Target::Permutation(p)) => return Ok(p),
                 Some(Target::Node(next)) => at = next,
@@ -318,12 +337,16 @@ impl Selector {
                 }
             }
         }
+        Err(WalkError::Malformed { node: at })
     }
 
     /// Every end of the tree with the option values on the way to it, in depth-first order of the entries.
     pub fn leaves(&self) -> Vec<Leaf> {
         fn go(s: &Selector, at: usize, path: &mut Vec<(usize, u64)>, out: &mut Vec<Leaf>) {
-            let node = &s.nodes[at];
+            // a path longer than the tree has nodes is a cycle of a hand-built tree
+            let Some(node) = s.nodes.get(at).filter(|_| path.len() <= s.nodes.len()) else {
+                return;
+            };
             for e in &node.edges {
                 path.push((node.option, e.value));
                 match e.to {

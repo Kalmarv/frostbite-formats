@@ -26,11 +26,6 @@
 //! bytes times four; the group's size field is the buffer's size rounded up to 16. For a resource group the first
 //! field is the resource's index and the kind a code kept as stored. Everything is kept as stored; the reader walks to
 //! the exact end of the blob and refuses what does not fit.
-#![allow(
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-    clippy::cast_possible_truncation
-)] // lint-todo
 
 use crate::{Rd, Result, bad, capacity};
 
@@ -95,7 +90,7 @@ impl Group {
     pub fn buffer_end(&self) -> u64 {
         (self.entries.iter())
             .filter(|e| e.at != u32::MAX)
-            .map(|e| u64::from(e.at) + u64::from(e.kind) / 4)
+            .map(|e| u64::from(e.at).saturating_add(u64::from(e.kind) / 4))
             .max()
             .unwrap_or(0)
     }
@@ -139,29 +134,31 @@ pub fn read(rtype: u32, d: &[u8], meta: &[u8; 16]) -> Result<Set> {
     }
     let tables_end = size;
     let mut groups = Vec::with_capacity(capacity(W, count, GROUP, size.saturating_sub(HEADER))?);
-    let mut end_of_data = HEADER + GROUP * count;
+    let groups_end = crate::at(HEADER, count, GROUP);
+    let mut end_of_data = groups_end;
     let mut pointers = Vec::new();
     let mut first_params = usize::MAX;
     for g in 0..count {
-        let at = HEADER + GROUP * g;
-        let n = usize::from(r.u16le(at + 0x10)?);
+        let at = crate::at(HEADER, g, GROUP);
+        let field = |k: usize| at.saturating_add(k);
+        let n = usize::from(r.u16le(field(0x10))?);
         let (all, own_params, table, end) = (
-            r.u64le(at + 0x20)? as usize,
-            r.u64le(at + 0x28)? as usize,
-            r.u64le(at + 0x30)? as usize,
-            r.u64le(at + 0x38)? as usize,
+            r.offset64le(field(0x20))?,
+            r.offset64le(field(0x28))?,
+            r.offset64le(field(0x30))?,
+            r.offset64le(field(0x38))?,
         );
-        pointers.extend([at + 0x20, at + 0x28, at + 0x30, at + 0x38]);
+        pointers.extend([field(0x20), field(0x28), field(0x30), field(0x38)]);
         first_params = first_params.min(own_params).min(all);
         if end > size {
             return Err(bad(
                 W,
-                at + 0x38,
+                field(0x38),
                 format!("tables end at {end:#x} in a payload of {size:#x}"),
             ));
         }
-        let params_end = own_params.checked_add(16 * n);
-        let table_end = table.checked_add(8 * n);
+        let params_end = own_params.checked_add(crate::at(0, n, 16));
+        let table_end = table.checked_add(crate::at(0, n, 8));
         if params_end.is_none_or(|e| e > table) || table_end.is_none_or(|e| e > end.min(tables_end)) {
             return Err(bad(
                 W,
@@ -169,7 +166,7 @@ pub fn read(rtype: u32, d: &[u8], meta: &[u8; 16]) -> Result<Set> {
                 format!("group {g}: {n} parameters at {own_params:#x} and entries at {table:#x} do not fit"),
             ));
         }
-        if own_params < HEADER + GROUP * count {
+        if own_params < groups_end {
             return Err(bad(
                 W,
                 at,
@@ -178,35 +175,36 @@ pub fn read(rtype: u32, d: &[u8], meta: &[u8; 16]) -> Result<Set> {
         }
         let params = (0..n)
             .map(|i| {
-                let p = own_params + 16 * i;
+                let p = crate::at(own_params, i, 16);
+                let field = |k: usize| p.saturating_add(k);
                 Ok(Param {
                     name: r.u64le(p)?,
-                    ty: r.u32le(p + 8)?,
-                    count: r.u16le(p + 12)?,
-                    extra: r.u16le(p + 14)?,
+                    ty: r.u32le(field(8))?,
+                    count: r.u16le(field(12))?,
+                    extra: r.u16le(field(14))?,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
         let entries = (0..n)
             .map(|i| {
-                let e = table + 8 * i;
+                let e = crate::at(table, i, 8);
                 Ok(Entry {
                     at: r.u32le(e)?,
-                    marker: r.u16le(e + 4)?,
-                    kind: r.u16le(e + 6)?,
+                    marker: r.u16le(e.saturating_add(4))?,
+                    kind: r.u16le(e.saturating_add(6))?,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
         end_of_data = end_of_data.max(table_end.unwrap_or(0));
         groups.push(Group {
             name: r.u64le(at)?,
-            size: r.u32le(at + 8)?,
-            flags: r.arr(at + 12)?,
+            size: r.u32le(field(8))?,
+            flags: r.arr(field(12))?,
             words: [
-                r.u16le(at + 0x12)?,
-                r.u16le(at + 0x14)?,
-                r.u16le(at + 0x16)?,
-                r.u16le(at + 0x18)?,
+                r.u16le(field(0x12))?,
+                r.u16le(field(0x14))?,
+                r.u16le(field(0x16))?,
+                r.u16le(field(0x18))?,
             ],
             params,
             entries,
@@ -214,44 +212,44 @@ pub fn read(rtype: u32, d: &[u8], meta: &[u8; 16]) -> Result<Set> {
     }
     // the relocation list: the offsets of the blob's pointers and a word or two; the groups' pointers are among them
     let words = (0..reloc / 4)
-        .map(|i| r.u32le(size + 4 * i))
+        .map(|i| r.u32le(crate::at(size, i, 4)))
         .collect::<Result<Vec<_>>>()?;
-    if !reloc.is_multiple_of(4) || reloc < 4 * (pointers.len() + 1) {
+    if !reloc.is_multiple_of(4) || reloc < crate::at(4, pointers.len(), 4) {
         return Err(bad(
             W,
             size,
             format!("{reloc} relocation bytes for {} groups", groups.len()),
         ));
     }
-    if let Some(p) = pointers.iter().find(|&&p| !words.contains(&(p as u32))) {
+    if let Some(p) = pointers
+        .iter()
+        .find(|&&p| !u32::try_from(p).is_ok_and(|p| words.contains(&p)))
+    {
         return Err(bad(
             W,
             size,
             format!("the relocation list lacks the pointer at {p:#x}"),
         ));
     }
-    if end_of_data > size || size - end_of_data > 64 {
+    let gap = size.checked_sub(end_of_data).filter(|&gap| gap <= 64);
+    let Some(gap) = gap else {
         return Err(bad(
             W,
             end_of_data,
             format!(
-                "{} bytes between the last entry table and the relocations",
-                size as i64 - end_of_data as i64
+                "the last entry table ends at {end_of_data:#x} and the relocations start at {size:#x}: expected a gap of at most 64 bytes"
             ),
         ));
-    }
+    };
     Ok(Set {
         id,
         head,
         pass,
         version,
         groups,
-        trailer: r.bytes(end_of_data, size - end_of_data)?.to_vec(),
+        trailer: r.bytes(end_of_data, gap)?.to_vec(),
         lead: r
-            .bytes(
-                HEADER + GROUP * count,
-                first_params.saturating_sub(HEADER + GROUP * count),
-            )?
+            .bytes(groups_end, first_params.saturating_sub(groups_end))?
             .to_vec(),
         relocations: words,
     })
@@ -300,7 +298,7 @@ impl<'a> Bindings<'a> {
             _ => (self.pass, 64),
         };
         let group = set?.groups.get(1)?;
-        let want = register - base;
+        let want = register.checked_sub(base)?;
         let i = group.entries.iter().position(|e| e.at == want)?;
         Some((group, i))
     }
@@ -317,12 +315,12 @@ impl<'a> Bindings<'a> {
     pub fn parameter(&self, name: u64) -> Option<Slot<'a>> {
         self.sets.iter().enumerate().find_map(|(set, s)| {
             s.as_ref()?.groups.iter().enumerate().find_map(|(group, g)| {
-                let index = g.params.iter().position(|p| p.name == name)?;
+                let (index, param) = g.params.iter().enumerate().find(|(_, p)| p.name == name)?;
                 Some(Slot {
                     set,
                     group,
                     index,
-                    param: &g.params[index],
+                    param,
                     entry: g.entries.get(index)?,
                 })
             })

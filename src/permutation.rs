@@ -13,11 +13,6 @@
 //! other resources of the family carry in their names and metadata ([`resource_id`]). The raster permutations seen
 //! hold a vertex and a pixel program, or a vertex program alone; a compute permutation one program. The word at 0x18
 //! of a raster permutation is kept as stored (it is 0 in every one seen).
-#![allow(
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-    clippy::cast_possible_truncation
-)] // lint-todo
 
 use crate::{Rd, Result, bad};
 
@@ -52,27 +47,13 @@ pub struct Permutation {
 
 /// The id a shader-family resource carries in the last eight bytes of its 16-byte metadata.
 pub fn resource_id(meta: &[u8; 16]) -> u64 {
-    u64::from_le_bytes([
-        meta[8], meta[9], meta[10], meta[11], meta[12], meta[13], meta[14], meta[15],
-    ])
+    meta.last_chunk::<8>().map_or(0, |id| u64::from_le_bytes(*id))
 }
 
 /// The name of the CompiledBytecode resource a permutation's GUID names: `shaders/bytecode/` and the GUID as text,
 /// its first three fields little endian as stored (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`).
 pub fn bytecode_name(g: &[u8; 16]) -> String {
-    let field = |a: usize, b: usize| -> String {
-        let mut bytes = g[a..b].to_vec();
-        bytes.reverse();
-        crate::hex(&bytes)
-    };
-    format!(
-        "shaders/bytecode/{}-{}-{}-{}-{}",
-        field(0, 4),
-        field(4, 6),
-        field(6, 8),
-        crate::hex(&g[8..10]),
-        crate::hex(&g[10..16])
-    )
+    format!("shaders/bytecode/{}", crate::guid_text(g))
 }
 
 /// Read a permutation of type `rtype` ([`RASTER`] or [`COMPUTE`]) from its payload and metadata. Refused: another
@@ -85,7 +66,7 @@ pub fn read(rtype: u32, d: &[u8], meta: &[u8; 16]) -> Result<Permutation> {
         t => return Err(bad(W, 0, format!("type {t:#010x} is not a permutation"))),
     };
     let m = Rd::new(meta, W);
-    let (size, reloc) = (m.u32le(0)? as usize, m.u32le(4)? as usize);
+    let (size, reloc) = (m.size32le(0)?, m.size32le(4)?);
     if size.checked_add(reloc) != Some(d.len()) {
         return Err(bad(
             W,
@@ -102,7 +83,9 @@ pub fn read(rtype: u32, d: &[u8], meta: &[u8; 16]) -> Result<Permutation> {
         Kind::Raster => 0x20,
         Kind::Compute => 0x10,
     };
-    if r.u64le(8)? != start as u64 || size <= start || !(size - start).is_multiple_of(16) {
+    let guids_len = size.checked_sub(start).filter(|&n| n > 0 && n.is_multiple_of(16));
+    let Some(guids_len) = guids_len.filter(|_| r.u64le(8).is_ok_and(|p| usize::try_from(p) == Ok(start)))
+    else {
         return Err(bad(
             W,
             8,
@@ -111,8 +94,8 @@ pub fn read(rtype: u32, d: &[u8], meta: &[u8; 16]) -> Result<Permutation> {
                 r.u64le(8)?
             ),
         ));
-    }
-    let count = (size - start) / 16;
+    };
+    let count = guids_len / 16;
     if count > 2 || (kind == Kind::Compute && count != 1) {
         return Err(bad(
             W,
@@ -127,7 +110,7 @@ pub fn read(rtype: u32, d: &[u8], meta: &[u8; 16]) -> Result<Permutation> {
         input_layout: (kind == Kind::Raster).then(|| r.u64le(0x10)).transpose()?,
         unknown_18: if kind == Kind::Raster { r.u64le(0x18)? } else { 0 },
         bytecode: (0..count)
-            .map(|i| r.arr::<16>(start + 16 * i))
+            .map(|i| r.arr::<16>(crate::at(start, i, 16)))
             .collect::<Result<_>>()?,
     })
 }
@@ -183,7 +166,7 @@ pub fn read_shared(rtype: u32, d: &[u8], meta: &[u8; 16]) -> Result<SharedData> 
         ));
     }
     let m = Rd::new(meta, "shared data");
-    let (size, reloc) = (m.u32le(0)? as usize, m.u32le(4)? as usize);
+    let (size, reloc) = (m.size32le(0)?, m.size32le(4)?);
     if size.checked_add(reloc) != Some(d.len()) {
         return Err(bad(
             "shared data",
@@ -209,7 +192,7 @@ pub fn read_shared(rtype: u32, d: &[u8], meta: &[u8; 16]) -> Result<SharedData> 
         sets: [some(0x18)?, some(0x20)?, some(0x28)?],
         root_slots,
         words: [r.u64le(0x10)?, r.u64le(0x30)?],
-        rest: r.bytes(0x40, d.len() - 0x40)?.to_vec(),
+        rest: r.bytes(0x40, d.len().saturating_sub(0x40))?.to_vec(),
     })
 }
 
@@ -387,15 +370,25 @@ impl SharedData {
             bad(
                 W,
                 STATE_AT,
-                format!("{} bytes hold no state", self.rest.len() + 0x40),
+                format!("{} bytes hold no state", self.rest.len().saturating_add(0x40)),
             )
         })?;
-        let b = |o: usize| s[o - STATE_AT];
-        let face = |o: usize| StencilFace {
-            fail: STENCIL_OPS[usize::from(b(o) & 7)],
-            depth_fail: STENCIL_OPS[usize::from(b(o) >> 3 & 7)],
-            pass: STENCIL_OPS[usize::from(b(o + 1) & 7)],
-            compare: COMPARES[usize::from(b(o + 1) >> 3 & 7)],
+        // `s` covers the payload offsets STATE_AT..STATE_END and every offset below lies in them
+        let b = |o: usize| s.get(o.wrapping_sub(STATE_AT)).copied().unwrap_or(0);
+        // a 3-bit field of a state byte picks one of the eight entries of a table
+        fn pick<T: Copy>(table: &[T; 8], v: u8, at: usize) -> Result<T> {
+            table
+                .get(usize::from(v & 7))
+                .copied()
+                .ok_or_else(|| bad("shared data state", at, format!("table index {v}")))
+        }
+        let face = |o: usize| -> Result<StencilFace> {
+            Ok(StencilFace {
+                fail: pick(&STENCIL_OPS, b(o), o)?,
+                depth_fail: pick(&STENCIL_OPS, b(o) >> 3, o)?,
+                pass: pick(&STENCIL_OPS, b(o.saturating_add(1)), o)?,
+                compare: pick(&COMPARES, b(o.saturating_add(1)) >> 3, o)?,
+            })
         };
         let mode = |o: usize| -> Result<u8> {
             let v = b(o) & 0x1f;
@@ -414,9 +407,14 @@ impl SharedData {
             write_mask: 0,
         }; 8];
         for (i, t) in targets.iter_mut().enumerate() {
-            let o = 0x8c + 5 * i;
-            if b(o + 1) >> 5 != 0 {
-                return Err(bad(W, o + 1, "colour blend operation bits are set"));
+            let o = crate::at(0x8c, i, 5);
+            let at = |k: usize| o.saturating_add(k);
+            if b(at(1)) >> 5 != 0 {
+                return Err(bad(
+                    W,
+                    at(1),
+                    "colour blend operation bits are set, expected the top 3 bits clear",
+                ));
             }
             let source = b(o) >> 1 & 0x1f;
             if source > 16 {
@@ -425,17 +423,17 @@ impl SharedData {
             *t = TargetRecord {
                 blend: b(o) & 1 != 0,
                 source,
-                destination: mode(o + 1)?,
-                source_alpha: mode(o + 2)?,
-                destination_alpha: mode(o + 3)?,
-                alpha_op: *BLEND_OPS.get(usize::from(b(o + 3) >> 5)).ok_or_else(|| {
+                destination: mode(at(1))?,
+                source_alpha: mode(at(2))?,
+                destination_alpha: mode(at(3))?,
+                alpha_op: *BLEND_OPS.get(usize::from(b(at(3)) >> 5)).ok_or_else(|| {
                     bad(
                         W,
-                        o + 3,
-                        format!("blend op {} is past the game's 5", b(o + 3) >> 5),
+                        at(3),
+                        format!("blend op {} is past the game's 5", b(at(3)) >> 5),
                     )
                 })?,
-                write_mask: b(o + 4),
+                write_mask: b(at(4)),
             };
         }
         let (raster, depth, blend) = (b(0x7f), b(0x80), b(0x87));
@@ -462,11 +460,11 @@ impl SharedData {
             depth_test: depth & 1 != 0,
             depth_write: depth >> 1 & 1 != 0,
             stencil_test: depth >> 2 & 1 != 0,
-            depth_compare: COMPARES[usize::from(depth >> 3 & 7)],
+            depth_compare: pick(&COMPARES, depth >> 3, 0x80)?,
             stencil_read_mask: b(0x81),
             stencil_write_mask: b(0x82),
-            front: face(0x83),
-            back: face(0x85),
+            front: face(0x83)?,
+            back: face(0x85)?,
             logic_op: blend & 0xf,
             logic_op_enable: blend >> 4 & 1 != 0,
             alpha_to_coverage: blend >> 5 & 1 != 0,

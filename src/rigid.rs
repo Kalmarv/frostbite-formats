@@ -1,6 +1,6 @@
 //! A rigid MeshSet and its geometry chunk built from triangle meshes ([`build`]): one LOD, one section a part, laid out
 //! as the game's own one-LOD Quick Drop meshes are (the 73 of `Win32/buildkititems.toc`, each one `default_mat`
-//! section; 60 store these three streams, 13 add a sub-material index, usage 51). `tests/rigid.rs` rebuilds each of
+//! section; 60 store these three streams, 13 add a sub-material index, usage 51). [`tests/rigid.rs`](https://github.com/Kalmarv/primase/tree/main/worlds/frostbite/tests/rigid.rs) rebuilds each of
 //! the 60 from its decoded geometry: the chunk comes out byte-identical but for tangent frames with two encodings
 //! (the same frame either way), and every record field but the measured ones below byte-identical.
 //!

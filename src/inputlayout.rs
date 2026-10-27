@@ -17,7 +17,7 @@
 //! `R32G32B32_FLOAT`, 10 `R16G16B16A16_FLOAT`, 34 `R16G16_FLOAT`, 28 `R8G8B8A8_UNORM`, ...) and its first byte
 //! (2, 3, 4 or 6) is kept as stored. A vertex program's input is an element with its semantic index; its semantic
 //! name mostly follows the element's usage ([`semantic_name`]) and [`InputLayout::resolve`] settles the rest by
-//! elimination. `tests/inputlayout.rs` checks it against the vertex programs' own input signatures: of the 15,383
+//! elimination. primase's [`tests/inputlayout.rs`](https://github.com/Kalmarv/primase/tree/main/worlds/frostbite/tests/inputlayout.rs) checks it against the vertex programs' own input signatures: of the 15,383
 //! inputs of the vertex programs of the game configuration's 2,931 raster permutations, 15,336 are one element by
 //! name and fit their format, 6 are one element by elimination and fit, and 41 are one element by name that the
 //! program reads wider than its format (`TEXCOORD0` as four components of a usage 2 element stored as `R16G16_UINT`,

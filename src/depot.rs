@@ -7,14 +7,17 @@
 use crate::{Rd, Result, bad, capacity};
 
 const W: &str = "shader block depot";
+/// The resource type id of a ShaderBlockDepot.
 pub const RTYPE: u32 = 0x7331_2045;
 
+/// A parameter block: its hash and its bytes (read its parameters with [`params`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Block {
     pub hash: u64,
     pub data: Vec<u8>,
 }
 
+/// A depot: the material key to block map, with the blocks it names.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Depot {
     pub head: u64,
@@ -24,6 +27,8 @@ pub struct Depot {
     pub blocks: Vec<Block>,
 }
 
+/// Read a depot from its payload `d` and the resource's 16-byte metadata. Refused: sizes that do not match the
+/// payload, a descriptor or block outside the payload.
 pub fn read(d: &[u8], meta: &[u8; 16]) -> Result<Depot> {
     let m = Rd::new(meta, W);
     let (size, rsize, version, count) = (

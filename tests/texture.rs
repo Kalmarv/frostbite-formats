@@ -3,7 +3,7 @@
 //! `Win32/items.toc` read and written back byte for byte, its chunk size the sum of its mip sizes, and for a 2D
 //! texture or array (kinds 0 and 3) of a format the table knows its mip sizes the chain of one slice; every resource id
 //! is odd and byte 0x21 is the level count; among the textures whose first mip is 0, `unknown_00` and byte 0x20 are
-//! zero in most (counted and printed: the costume stage's stated choice rests on it). Other kinds (a
+//! zero in most (counted, printed and asserted to be most of them). Other kinds (a
 //! volume's levels count its depth) are counted, not checked.
 
 #![allow(clippy::unwrap_used)]
@@ -158,8 +158,8 @@ fn every_texture_of_the_items_toc_reads_and_writes_back() -> R {
     }
     println!("{read} texture headers; by format {formats:?}; by kind {kinds:?}");
     println!("first mip 0: {first0}; unknown_00 zero in {zero_00}, byte 0x20 zero in {zero_20}");
-    // what the costume stage writes for a texture whose chunk holds every level (a stated choice, not a rule): zero,
-    // the most common value of both among such textures
+    // what a writer should store for a texture whose chunk holds every level (a stated choice, not a rule): zero, the
+    // most common value of both among such textures
     assert!(
         2 * zero_00 > first0 && 2 * zero_20 > first0,
         "{zero_00} {zero_20} of {first0}"

@@ -1,9 +1,9 @@
 //! Shader permutations and program records: hand-laid permutations read to their ids and GUIDs, the refusals, a GUID's
 //! bytecode name, program records read from a hand-laid program lookup, a shared data's fixed-function state read in
 //! the layouts the game's own state printers use (`Skate.exe`'s rc2 IR filter: the oracle, see
-//! `frostbite_formats::permutation::FixedState`); and, on the game's data (the skate. install and its Oodle 9 library),
-//! every program of the first program database of `Win32/globals.toc` followed through its permutations to bytecode
-//! that reads, a material key's programs read into a world, and every stock raster state decoded.
+//! `frostbite_formats::permutation::FixedState`). The checks on the game's own data (every program of the first program
+//! database of `Win32/globals.toc` followed through its permutations to bytecode that reads, and every stock raster
+//! state decoded) are in primase's [`worlds/frostbite/tests/permutation.rs`](https://github.com/Kalmarv/primase/tree/main/worlds/frostbite/tests/permutation.rs).
 
 #![allow(clippy::unwrap_used)]
 
@@ -92,8 +92,8 @@ fn a_malformed_permutation_is_refused() {
     assert!(refused(&d, &m, COMPUTE).contains("GUIDs"));
 }
 
-/// A GUID's bytecode name: its first three fields are little endian as stored, the rest in order; the example is a
-/// CompiledBytecode resource of the install and the bytes its permutation holds.
+/// A GUID's bytecode name: its first three fields are little endian as stored, the rest in order; the first example is
+/// the name of a CompiledBytecode resource of the game.
 #[test]
 fn a_guid_names_its_bytecode_resource() {
     assert_eq!(

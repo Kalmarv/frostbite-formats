@@ -1,7 +1,8 @@
-//! Gates of the Frostbite containers: containers built by our writers read back to the same values and write again
+//! Tests of the Frostbite containers: containers built by our writers read back to the same values and write again
 //! to the same bytes, the TOC's perfect hashes resolve every key, and counts read from a file that cannot fit are
-//! refused before anything is reserved. The real-data gates (a Studio Patch round trip, an independent reader's
-//! summary, the base-game census) are in `worlds/reskate/tests/postcompile_fb.rs`.
+//! refused before anything is reserved. The real-data checks (a Studio Patch round trip, an independent reader's
+//! summary, a census of the base game) are in primase's
+//! [`worlds/reskate/tests/postcompile_fb.rs`](https://github.com/Kalmarv/primase/tree/main/worlds/reskate/tests/postcompile_fb.rs).
 
 #![allow(clippy::unwrap_used)]
 

@@ -1,6 +1,10 @@
 [package]
 name = "frostbite-formats"
-description = "Frostbite containers (skate. build): superbundle TOCs, bundles, CAS, the native DB, .fbmod, shader depots and permutations, MeshSet, physics, EBX documents"
+description = "Read and write the Frostbite containers and resources of skate. (2025): TOCs, bundles, CAS, EBX documents, shaders, meshes, physics, .fbmod mods"
+keywords = ["frostbite", "skate", "ebx", "modding", "game-files"]
+categories = ["parser-implementations", "game-development"]
+readme = "README.md"
+documentation = "https://docs.rs/frostbite-formats"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

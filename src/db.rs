@@ -7,6 +7,8 @@ use crate::{Rd, Result, bad, latin1};
 
 const W: &str = "native db";
 
+/// A node of the native DB tree: a type tag, an optional name, and either children (lists and objects), a payload
+/// (strings, blobs and fixed-size values) or neither.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct Node {
     pub ty: u8,
@@ -18,6 +20,7 @@ pub struct Node {
 }
 
 impl Node {
+    /// The named child `key` of an object, if there is one.
     pub fn field(&self, key: &str) -> Option<&Node> {
         self.children.iter().find(|c| c.named && c.name == key)
     }
@@ -26,6 +29,7 @@ impl Node {
         let t = self.payload.strip_suffix(&[0]).unwrap_or(&self.payload);
         t.iter().map(|&b| char::from(b)).collect()
     }
+    /// The value of a 32-bit integer node (type 8), `None` for any other node.
     pub fn u32(&self) -> Option<u32> {
         (self.ty == 8 && self.payload.len() == 4)
             .then(|| u32::from_le_bytes([self.payload[0], self.payload[1], self.payload[2], self.payload[3]]))
@@ -136,6 +140,8 @@ fn put_varint(out: &mut Vec<u8>, mut v: usize) {
     }
 }
 
+/// Append `n` and its children to `out`, the counterpart of [`read_node`]. Refused: a name that is not Latin-1, a
+/// fixed-size value of the wrong length, a type this module does not know.
 pub fn write_node(n: &Node, out: &mut Vec<u8>) -> Result<()> {
     if n.ty == 0 {
         out.push(0);
@@ -185,6 +191,7 @@ pub fn read_file(data: &[u8]) -> Result<(Vec<u8>, Node, Vec<u8>)> {
     Ok((data[..ENVELOPE].to_vec(), root, data[pos..].to_vec()))
 }
 
+/// A DB file: `envelope`, the tree and `trailer`, the counterpart of [`read_file`].
 pub fn write_file(envelope: &[u8], root: &Node, trailer: &[u8]) -> Result<Vec<u8>> {
     let mut out = envelope.to_vec();
     write_node(root, &mut out)?;

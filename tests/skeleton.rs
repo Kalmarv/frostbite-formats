@@ -1,7 +1,7 @@
-//! Skeleton assets and the skeleton a skinned mesh's bone lists address: on the skate. install (and its Oodle 9
-//! library), the character skeleton `animation/dingo/animbase_default_skeleton` read from the globals bundle, and the
-//! hat bucket's meshes (bone lists of 386 bones) linked to it by the resolve pass; and the reader's checks on a
-//! skeleton by itself.
+//! The skeleton reader's checks on a skeleton by itself: a joint name is hashed with FNV-1, and the parents may not
+//! lead back. The checks on the game's own skeleton (`animation/dingo/animbase_default_skeleton`, and the meshes
+//! whose bone lists address it) are in primase's
+//! [`worlds/frostbite/tests/skeleton.rs`](https://github.com/Kalmarv/primase/tree/main/worlds/frostbite/tests/skeleton.rs).
 
 #![allow(clippy::unwrap_used)]
 

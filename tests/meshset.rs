@@ -1,4 +1,4 @@
-//! Gates of the MeshSet reader and writer (`frostbite_formats::meshset`).
+//! Tests of the MeshSet reader and writer (`frostbite_formats::meshset`).
 //!
 //! - `the_games_own_meshsets_round_trip` (`installs.skate/Data`, `tools.oodle9`): every MeshSet of every TOC (all
 //!   three LOD record forms, both headers, the development mesh with data after its relocation table) reads with its

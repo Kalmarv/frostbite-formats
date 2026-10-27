@@ -18,7 +18,7 @@
 //! The permutation indices of the leaves are every index below the permutation count, each once. A record with no
 //! options, nodes or entries has one permutation, which every walk ends at.
 //!
-//! Measured on the game's data (one read-only dump of 130 sampled records that have a tree, `tests/selector_dump.rs`):
+//! Measured on the game's data (one read-only dump of 130 sampled records that have a tree, [`selector_dump.rs`](https://github.com/Kalmarv/primase/tree/main/worlds/frostbite/tests/selector_dump.rs)):
 //! all of those tile, are such trees, and test one option per level; the 6 that mix child and leaf entries are the
 //! ones whose leaves lie above the last option. Every other record is unmeasured until a census reads them all.
 //! The options are the engine's: 43 of 1,345 option names appear in a material's depot block, so the values a walk

@@ -9,6 +9,7 @@
 use crate::{Error, Result, bad};
 
 const W: &str = "compiled bytecode";
+/// The resource type id of a CompiledBytecode resource.
 pub const RTYPE: u32 = 0x0E2B_02F7;
 /// The offset of the four-byte tag (`RC2S`, `RPTR`) a payload's header carries.
 pub const TAG_AT: usize = 0x20;

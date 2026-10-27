@@ -167,16 +167,20 @@ fn fields_by_name(doc: &Document, t: usize) -> Result<BTreeMap<String, usize>> {
 #[derive(Debug)]
 pub struct Carrier<'a> {
     from: &'a Document,
+    /// The document values are carried into.
     pub to: &'a mut Document,
     type_by_name: BTreeMap<String, usize>,
     instance_by_guid: BTreeMap<[u8; 16], usize>,
     carried_internal: BTreeMap<usize, usize>,
     fields: BTreeMap<usize, BTreeMap<String, usize>>,
+    /// How many instances have been added to `to`.
     pub instances: usize,
+    /// How many carried exported instances were given a new object id.
     pub renumbered: usize,
 }
 
 impl<'a> Carrier<'a> {
+    /// A carrier from `from` into `to`.
     pub fn new(from: &'a Document, to: &'a mut Document) -> Self {
         let mut type_by_name = BTreeMap::new();
         for (i, t) in to.types.iter().enumerate() {
@@ -272,6 +276,7 @@ impl<'a> Carrier<'a> {
         Ok(self.to.imports.len() - 1)
     }
 
+    /// `src` (an object of `from`) as an object of `to`, with what it points at carried along.
     pub fn object(&mut self, src: &Object) -> Result<Object> {
         let t = self.ty(src.descriptor)?;
         if !self.fields.contains_key(&t) {
@@ -299,6 +304,7 @@ impl<'a> Carrier<'a> {
         Ok(out)
     }
 
+    /// `v` (a value of `from`) as a value of `to`.
     pub fn value(&mut self, v: &Value) -> Result<Value> {
         Ok(match v {
             Value::Pointer(Pointer::Internal(i)) => Value::Pointer(Pointer::Internal(self.instance(*i)?)),

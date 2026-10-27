@@ -1,5 +1,5 @@
 //! Frostbite EBX documents: RIFF `EBX\0`/`EBXS` files holding the EBXD payload, EFIX fixups, EBXX array and
-//! boxed-value records, and a REFL or RFL2 reflection table. [`read`] turns one into typed values, [`write`] lays a
+//! boxed-value records, and a REFL or RFL2 reflection table. [`read`] turns one into typed values, [`write()`] lays a
 //! document out again, and [`carry`] moves values (and what they point at) from one document into another.
 //!
 //! This is a port of ReSkate's EBX reader, writer and merge (`Engine/Resource/ebx_document.cpp`,
@@ -61,6 +61,7 @@ pub enum FieldType {
 }
 
 impl FieldType {
+    /// The type for the five-bit code `v`; a code that is not one of the known types is [`FieldType::Unknown`].
     pub fn from_bits(v: u16) -> FieldType {
         use FieldType::*;
         const ALL: [FieldType; 29] = [
@@ -101,6 +102,7 @@ impl FieldType {
 /// The category nibble of an encoded type (`FieldCategory`); only `Array` (4) changes how a field is read.
 const CATEGORY_ARRAY: u16 = 4;
 
+/// A field of a reflected type: its name, encoded type and where it lies in an instance.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FieldDescriptor {
     pub name: String,
@@ -112,14 +114,17 @@ pub struct FieldDescriptor {
 }
 
 impl FieldDescriptor {
+    /// The field's [`FieldType`].
     pub fn ty(&self) -> FieldType {
         FieldType::from_bits((self.encoded_type >> 4) & 0x1F)
     }
+    /// Whether the field is an array.
     pub fn is_array(&self) -> bool {
         self.encoded_type & 0x0F == CATEGORY_ARRAY
     }
 }
 
+/// A reflected type: its name, size, alignment, GUID, signature and the run of [`Document::fields`] it owns.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TypeDescriptor {
     pub name: String,
@@ -133,6 +138,7 @@ pub struct TypeDescriptor {
     pub signature: u32,
 }
 
+/// An import: the file GUID of another document and the GUID of the instance in it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ImportReference {
     pub file_guid: [u8; 16],
@@ -159,6 +165,7 @@ pub struct ReflectionGroup {
     pub first: u32,
 }
 
+/// An EBXX boxed-value record: where a boxed value starts, its hash and type, and its raw bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BoxedValueRecord {
     pub offset: u32,
@@ -170,6 +177,7 @@ pub struct BoxedValueRecord {
     pub raw: Vec<u8>,
 }
 
+/// An object stored in the document, with its type, its GUID if it is exported, and its decoded values.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Instance {
     pub fixup_type: u16,
@@ -183,6 +191,7 @@ pub struct Instance {
     pub raw_image: Vec<u8>,
 }
 
+/// What a pointer field holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Pointer {
     Null,
@@ -192,6 +201,7 @@ pub enum Pointer {
     External(usize),
 }
 
+/// A type reference value: a primitive type or a type of the document's reflection table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TypeRef {
     pub primitive: bool,
@@ -200,6 +210,7 @@ pub struct TypeRef {
     pub encoded: u32,
 }
 
+/// A reference to a boxed value in the document's boxed-value section.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BoxedRef {
     pub encoded_type: u32,
@@ -208,6 +219,7 @@ pub struct BoxedRef {
     pub relative_offset: i64,
 }
 
+/// A field's value.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
     Nothing,
@@ -228,6 +240,7 @@ pub enum Value {
     Array(Vec<Value>, Option<u32>),
 }
 
+/// A field of an [`Object`] with its value.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FieldValue {
     /// Index into [`Document::fields`].
@@ -236,6 +249,7 @@ pub struct FieldValue {
     pub value: Value,
 }
 
+/// A structure: its type and its fields' values, in stored order.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Object {
     pub descriptor: usize,
@@ -250,6 +264,7 @@ impl Object {
             .find(|f| f.name.eq_ignore_ascii_case(name))
             .map(|f| &f.value)
     }
+    /// The field named `name`, mutably.
     pub fn field_mut(&mut self, name: &str) -> Option<&mut Value> {
         self.fields
             .iter_mut()
@@ -258,6 +273,8 @@ impl Object {
     }
 }
 
+/// An EBX document read by [`read`]: its instances with typed values, together with the reflection data, fixup
+/// tables and payload that [`write()`] needs to lay it out again.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Document {
     pub file_guid: [u8; 16],

@@ -14,7 +14,7 @@
 //! the stored (encoded) payload. Layout after FrostyToolsuite's `FrostyModReader`, `BaseModResource`, `ResResource` and
 //! `ChunkResource`; the bytes are Studio's, read to the exact end.
 //!
-//! Decoding a payload needs the game's Oodle library, which the caller loads ([`Fbmod::payload`]). [`write`] is the reader's counterpart: an unmodified file read and written again is byte-identical. The SHA-1 of a
+//! Decoding a payload needs the game's Oodle library, which the caller loads ([`Fbmod::payload`]). [`write()`] is the reader's counterpart: an unmodified file read and written again is byte-identical. The SHA-1 of a
 //! payload is recomputed on writing (and checked on reading), so it is not a field.
 
 use crate::cas::{self, Cas, CasRaw};
@@ -25,6 +25,7 @@ use primase_foundations::compress::{Compressor, Decompressor};
 use sha1::{Digest, Sha1};
 
 const W: &str = "fbmod";
+/// The first eight bytes of a mod.
 pub const MAGIC: [u8; 8] = *b"FROSTY\0\x01";
 /// The only version Studio writes.
 pub const VERSION: u32 = 6;
@@ -42,6 +43,7 @@ pub enum EntryKind {
 }
 
 impl EntryKind {
+    /// The kind byte an entry stores.
     pub fn id(self) -> u8 {
         match self {
             Self::Embedded => 0,
@@ -84,6 +86,7 @@ pub enum Body {
 }
 
 impl Body {
+    /// The entry kind this body belongs to.
     pub fn kind(&self) -> EntryKind {
         match self {
             Self::Embedded => EntryKind::Embedded,
@@ -106,6 +109,7 @@ pub struct Stored {
     pub user: String,
 }
 
+/// One entry of a mod: an asset it adds or replaces, with its payload (if it has one) and the bundles it touches.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
     pub name: String,
@@ -117,6 +121,7 @@ pub struct Entry {
 }
 
 impl Entry {
+    /// The entry's kind.
     pub fn kind(&self) -> EntryKind {
         self.body.kind()
     }
@@ -126,6 +131,7 @@ impl Entry {
     }
 }
 
+/// A `.fbmod` file read into its header fields, entries and CAS-framed payloads.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Fbmod {
     pub version: u32,

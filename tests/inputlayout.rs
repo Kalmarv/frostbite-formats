@@ -1,8 +1,7 @@
 //! Input layouts: a hand-laid layout read to its elements and usages, the refusals, and the rule that sends a vertex
-//! program's inputs to its elements; and, on the game's data (the skate. install and its Oodle 9 library), every input
-//! layout of the game configuration, level root and customization TOCs read, and the vertex programs of the game
-//! configuration's raster permutations compared with their layouts: each input of the program must be the one element
-//! its semantic name and index name.
+//! program's inputs to its elements. The checks on the game's own data (every input layout read, and the vertex
+//! programs of the game configuration's raster permutations compared with their layouts) are in primase's
+//! [`worlds/frostbite/tests/inputlayout.rs`](https://github.com/Kalmarv/primase/tree/main/worlds/frostbite/tests/inputlayout.rs).
 
 #![allow(clippy::unwrap_used)]
 

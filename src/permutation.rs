@@ -22,12 +22,14 @@ pub const RASTER: u32 = 0xD489_FACB;
 /// ExpressionShaderComputePermutation.
 pub const COMPUTE: u32 = 0x95CE_62DD;
 
+/// Whether a permutation draws or computes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Raster,
     Compute,
 }
 
+/// A permutation: the programs (as CompiledBytecode GUIDs) one choice of options runs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Permutation {
     pub kind: Kind,

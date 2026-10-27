@@ -1,4 +1,4 @@
-//! EBX gates: committed synthetic documents read to their expected values and written back byte for byte, values
+//! EBX tests: committed synthetic documents read to their expected values and written back byte for byte, values
 //! carried between documents, and a census over real documents named by `oracles.corpus.skate/ebx`.
 //!
 //! BASELINE: the synthetic fixtures were produced from the writer's own layout rules (a standalone layout script) and

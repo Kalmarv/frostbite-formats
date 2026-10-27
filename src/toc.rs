@@ -1,10 +1,13 @@
 //! Superbundle TOC (`*.toc`): a 0x22C-byte envelope, then a big-endian header, the bundles (name, inline region)
 //! and the chunk table, each found through a perfect hash over its keys (lowercase bundle names, chunk GUIDs).
-//! Base-game TOCs store names Huffman-coded (flag 4); Patch TOCs as plain strings, which is what [`write`] writes.
+//! Base-game TOCs store names Huffman-coded (flag 4); Patch TOCs (the ones in a folder of added or replaced files,
+//! as ReSkate Studio writes it beside the game's `Data`) store them as plain strings, which is what [`write()`] writes.
 
 use crate::{Rd, Result, align, bad, latin1};
 
+/// Length of the envelope that precedes a TOC's (or `layout.toc`'s) own data.
 pub const ENVELOPE: usize = 0x22C;
+/// The four bytes an envelope starts with.
 pub const MAGIC: [u8; 4] = [0x00, 0xd1, 0xce, 0x01];
 const FNV_SEED: u32 = 0x811C_9DC5;
 const W: &str = "toc";
@@ -20,6 +23,7 @@ pub struct Loc {
 }
 
 impl Loc {
+    /// A `Loc` from the 64-bit identifier a TOC or region stores.
     pub fn decode(v: u64) -> Self {
         Self {
             patch: v & (0xFF << 48) != 0,
@@ -27,6 +31,7 @@ impl Loc {
             archive: v as u16,
         }
     }
+    /// The 64-bit identifier a TOC or region stores for this `Loc`.
     pub fn encode(self) -> u64 {
         (u64::from(self.patch) << 48) | (u64::from(self.chunk) << 16) | u64::from(self.archive)
     }
@@ -40,6 +45,8 @@ pub struct TocChunk {
     pub file: Option<(Loc, u32, u32)>,
 }
 
+/// A superbundle TOC as stored: its flags, its bundles (name and inline region bytes), its chunk table and the
+/// perfect-hash maps over the bundle names and chunk GUIDs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Toc {
     pub flags: u32,
@@ -128,6 +135,9 @@ impl Huffman {
     }
 }
 
+/// Read a TOC (envelope included). Refused: a wrong envelope, a negative count, a table or string outside the
+/// file, a bundle region that is not inline, a Huffman table or name that does not decode, a chunk reference that
+/// does not resolve.
 pub fn read(data: &[u8]) -> Result<Toc> {
     if data.len() < ENVELOPE + 48 || data[..4] != MAGIC {
         return Err(bad(W, 0, "envelope is invalid"));

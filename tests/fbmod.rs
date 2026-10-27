@@ -1,9 +1,9 @@
-//! `.fbmod` gates: hand-built containers of every entry kind read back to the same values and write again byte for
+//! `.fbmod` tests: hand-built containers of every entry kind read back to the same values and write again byte for
 //! byte, the bytes of a small one are checked against the layout worked by hand, and what the reader refuses is
-//! refused. The real-data gate reads every file of `oracles.baseline.skate/fbmod`.
+//! refused. The real-data test reads every file of `oracles.baseline.skate/fbmod`.
 //!
 //! BASELINE: the real files are ReSkate Studio's own output (`cosmetic-mesh-import`, 2026-10-12), a round-trip baseline
-//! of our producer's files, not an oracle. Each file's entry listing (kind, name, decoded size, stored size, one line
+//! for this reader and writer, not an independent reference. Each file's entry listing (kind, name, decoded size, stored size, one line
 //! per entry, printed with `--nocapture`) was compared by hand with the Python reference reader's; every payload must
 //! decode to the size its entry states.
 
@@ -301,7 +301,7 @@ fn real_files_round_trip() -> R {
     let Some(dll) = tool(Tool::Oodle9) else {
         return Ok(());
     };
-    // SAFETY: the gate configuration names the user's own trusted game DLL.
+    // SAFETY: the configuration names the user's own trusted game DLL.
     let oodle = Some(unsafe {
         primase_foundations::compress::oodle::Oodle::load(
             dll,

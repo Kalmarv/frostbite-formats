@@ -5,7 +5,7 @@
 #![allow(
     clippy::disallowed_methods,
     clippy::disallowed_types,
-    reason = "test I/O: real-data gates"
+    reason = "test I/O: real-data tests"
 )]
 
 mod inputs;
@@ -74,7 +74,7 @@ fn dll_cross_checks() -> R {
         let Some(path) = tool(oodle) else {
             continue;
         };
-        // SAFETY: gate configuration explicitly identifies the user's trusted game DLL.
+        // SAFETY: the configuration explicitly identifies the user's trusted game DLL.
         #[allow(unsafe_code)]
         let dll = unsafe { Oodle::load(path, version)? };
         let cas = Cas { oodle: Some(&dll) };

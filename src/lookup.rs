@@ -6,7 +6,9 @@ use std::collections::BTreeMap;
 
 use crate::{Rd, Result, bad, capacity};
 
+/// The resource type id of the program lookup (ExpressionShaderDatabase).
 pub const PROGRAM_LOOKUP: u32 = 0xE2E6_955B;
+/// The resource type id of the streamable texture set lookup table.
 pub const TEXTURE_LOOKUP: u32 = 0x2D25_4A89;
 
 /// A program lookup resource: everything before the rows (the program records), and the rows.
@@ -18,6 +20,8 @@ pub struct ProgramLookup {
     pub order: Vec<u64>,
 }
 
+/// Read a program lookup from its payload and metadata. Refused: metadata that does not match the payload, a row of
+/// no programs or of more than 4096, a repeated key, data after the last row.
 pub fn read_programs(d: &[u8], meta: &[u8; 16]) -> Result<ProgramLookup> {
     let m = Rd::new(meta, "program lookup meta");
     let (program, reloc, lookup) = (m.u32le(0)? as usize, m.u32le(4)? as usize, m.u32le(8)? as usize);
@@ -86,6 +90,7 @@ pub fn read_texture_sets(d: &[u8]) -> Result<Vec<(u64, u64)>> {
         .collect()
 }
 
+/// The bytes of texture set rows, the counterpart of [`read_texture_sets`].
 pub fn write_texture_sets(rows: &[(u64, u64)]) -> Vec<u8> {
     rows.iter()
         .flat_map(|(k, v)| k.to_le_bytes().into_iter().chain(v.to_le_bytes()))
@@ -150,7 +155,7 @@ pub fn read_records(d: &[u8], meta: &[u8; 16]) -> Result<Vec<ProgramRecord>> {
 /// ExpressionShaderStreamableTextureSet: what a texture lookup row's value is the id of. It lists the texture
 /// parameters of a material, not texture assets: neither the id of a texture's resource nor the GUID of its asset
 /// occurs in the set of any of the 64 materials of a sample of 15 bundles (0 of 987 references; the link from a
-/// material to its textures is the depot block's, [`crate::textures`]). Layout, as read from the first 192 bytes of
+/// material to its textures is the depot block's, [`crate::depot`]). Layout, as read from the first 192 bytes of
 /// three sets (5, 2 and 14 entries; not read by this crate):
 ///
 /// ```text

@@ -1,5 +1,5 @@
 //! skate.'s PhysicsResource (resource type 0x41759364): the collision a PhysicsAsset or EcsPhysicsAsset names. Read
-//! and written faithfully ([`read`], [`write`]), and a triangle soup encoded as the triangle-mesh shapes ReSkate Studio
+//! and written faithfully ([`read`], [`write()`]), and a triangle soup encoded as the triangle-mesh shapes ReSkate Studio
 //! writes ([`weld`], [`mesh_shape`]).
 //!
 //! Layout (little endian; every offset is self-relative, the field's own position plus its value):
@@ -36,7 +36,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use crate::{Rd, Result, bad, capacity};
 
 const W: &str = "physics resource";
+/// The resource type id of a PhysicsResource.
 pub const RTYPE: u32 = 0x4175_9364;
+/// The magic word at 0x04.
 pub const MAGIC: u32 = 0x69AF_7015;
 /// The shape table's offset field and the first byte of the body.
 const BODY: usize = 0x38;
@@ -115,6 +117,7 @@ pub struct Edge {
 }
 
 impl Edge {
+    /// An edge that says nothing about its neighbour: no face across it, or none that pairs.
     pub const OPEN: Edge = Edge {
         value: 1.0,
         concave: false,
@@ -148,6 +151,7 @@ pub struct Plane {
 }
 
 impl Shape {
+    /// The number of faces.
     pub fn face_count(&self) -> usize {
         self.faces.len().saturating_sub(1)
     }
@@ -608,7 +612,7 @@ fn area2(p: &[[f32; 3]], t: [u32; 3]) -> f64 {
 /// One shape of welded triangles (a batch: one material's triangles of a welded object, at most [`MAX_U16`] corners),
 /// encoded as Studio's FUN_140158c20 and FUN_14015c790 do: the vertices recentred on the middle of their bounds (that
 /// middle is the part's position, returned), triangles with no area after recentring dropped, the vertices the rest
-/// use renumbered in first-use order, every corner's edge data ([`edges`]), and the tree ([`tree`]) with the faces in
+/// use renumbered in first-use order, every corner's edge data ([`edges`]), and the tree with the faces in
 /// its leaf order. `None` when no triangle is left.
 pub fn mesh_shape(positions: &[[f32; 3]], triangles: &[[u32; 3]]) -> Result<Option<(Shape, [f32; 3])>> {
     if triangles.len() * 3 > MAX_U16 {

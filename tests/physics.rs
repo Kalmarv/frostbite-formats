@@ -1,8 +1,8 @@
-//! Gates of the PhysicsResource reader, writer and mesh encoder (`frostbite_formats::physics`).
+//! Tests of the PhysicsResource reader, writer and mesh encoder (`frostbite_formats::physics`).
 //!
 //! - Synthetic: a cube's encoding (welding, edges, faces) worked by hand; every face of a bumpy grid inside the box
 //!   its leaf of the tree decodes to; a refused corrupt resource.
-//! - The encoding reproduces ReSkate Studio's own output byte for byte: `worlds/reskate/tests/physics.rs`.
+//! - The encoding reproduces ReSkate Studio's own output byte for byte: [`worlds/reskate/tests/physics.rs`](https://github.com/Kalmarv/primase/tree/main/worlds/reskate/tests/physics.rs) in primase.
 //! - `the_games_own_resources_round_trip` (`installs.skate/Data`, `tools.oodle9`): every PhysicsResource of every TOC
 //!   reads and writes back byte-identical (the game's layouts: with and without the body, polygon faces, convex shapes
 //!   and boxes with face planes), but those with the tables not read yet, refused by name.

@@ -6,7 +6,9 @@ use crate::{Rd, Result, bad, capacity, latin1};
 
 const R: &str = "bundle region";
 const M: &str = "bundle manifest";
+/// The salt a manifest's magic word is xored with.
 pub const BUNDLE_SALT: u32 = 0x7065_636E;
+/// The manifest magic (before the salt is applied).
 pub const BUNDLE_MAGIC: u32 = 0xED1C_EDB8;
 
 /// One file of a bundle: archive, offset, stored size.
@@ -110,6 +112,7 @@ pub fn write_region(files: &[FileRef], inline: &[u8]) -> Vec<u8> {
     out
 }
 
+/// What a manifest row names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Ebx,
@@ -150,6 +153,7 @@ impl Asset {
     }
 }
 
+/// A bundle's binary manifest: its EBX documents, resources and chunks, and the chunk metadata DB.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Manifest {
     pub ebx: Vec<Asset>,
@@ -161,13 +165,15 @@ pub struct Manifest {
 }
 
 impl Manifest {
+    /// The number of assets (EBX documents, resources and chunks).
     pub fn count(&self) -> usize {
         self.ebx.len() + self.res.len() + self.chunks.len()
     }
-    /// Index in the region's file list (manifest first) of resource `i` / chunk `i`.
+    /// Index in the region's file list (manifest first) of resource `i`.
     pub fn res_file(&self, i: usize) -> usize {
         1 + self.ebx.len() + i
     }
+    /// Index in the region's file list of chunk `i`.
     pub fn chunk_file(&self, i: usize) -> usize {
         1 + self.ebx.len() + self.res.len() + i
     }
@@ -184,6 +190,8 @@ pub fn is_manifest(m: &[u8]) -> bool {
     declared + 4 == m.len() && (be ^ BUNDLE_SALT == BUNDLE_MAGIC || le ^ BUNDLE_SALT == BUNDLE_MAGIC)
 }
 
+/// Read a bundle manifest to its exact end. Refused: a truncated header, a declared size that is not the data's,
+/// an unknown magic, counts that do not add up, a string or table outside the data.
 pub fn read_manifest(m: &[u8]) -> Result<Manifest> {
     let rd = Rd::new(m, M);
     if m.len() < 36 {

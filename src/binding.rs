@@ -261,7 +261,7 @@ pub fn read(rtype: u32, d: &[u8], meta: &[u8; 16]) -> Result<Set> {
 ///                    t64 and up -> the pass binding, group 1, the entry whose index is the register - 64
 /// ```
 ///
-/// Evidence (`tests/binding.rs`, the 2,931 raster permutations of the game configuration bundle and the programs
+/// Evidence (primase's [`tests/binding.rs`](https://github.com/Kalmarv/primase/tree/main/worlds/frostbite/tests/binding.rs), the 2,931 raster permutations of the game configuration bundle and the programs
 /// they run, counting each declared register in space 0): the constant buffers at b4 have the size the pass binding's
 /// group 0 lays out in 5,707 of 5,707; at b1 the size set 0's group 0 lays out in 2,867 of 2,887; at b0 the size set
 /// 1's group 0 lays out in 4,069 of 4,613 (the other 544 are not told apart: b0 may have another source there); the
@@ -304,7 +304,7 @@ impl<'a> Bindings<'a> {
     /// names it, in groups 0 and 1 and so on.
     ///
     /// A material's depot block fills its parameters by name: on a sample of 39 materials of `Win32/items.toc` (the
-    /// permutations their programs run, `tests/binding.rs`) every parameter of set 0, both groups (34,756 of the
+    /// permutations their programs run, primase's [`tests/binding.rs`](https://github.com/Kalmarv/primase/tree/main/worlds/frostbite/tests/binding.rs)) every parameter of set 0, both groups (34,756 of the
     /// constant-buffer group, 4,052 of the resource group), is named by the material's block with the same type and
     /// count; of set 1's resource group 1,824 of 3,888 are, of set 2's group 0 1,152 of 4,548, and none of set 1's
     /// group 0 or the pass binding's (the engine fills those).

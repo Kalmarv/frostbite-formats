@@ -1,4 +1,4 @@
-//! Gate of the tangent frame codec (`frostbite_formats::tangent`): frames encode and decode back within the codec's
+//! Tests of the tangent frame codec (`frostbite_formats::tangent`): frames encode and decode back within the codec's
 //! steps (normal 0.2 degrees, tangent 0.4); a frame on an axis, a tangent along the normal, both signs.
 
 #![allow(clippy::unwrap_used)]

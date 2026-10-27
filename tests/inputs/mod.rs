@@ -1,7 +1,7 @@
-//! The real-data inputs this crate's tests read, each with what it is, where it comes from and whether the
-//! landing gate needs it (`primase_testdata::inputs!`; README.md here lists them). Integration tests reach it
-//! with `mod inputs;`, unit tests with `#[cfg(test)] #[path = "../tests/inputs/mod.rs"] mod inputs;` in the
-//! crate root, and tests/real_data_inputs.rs checks that every query the crate's sources write is declared
+//! The real-data inputs this crate's tests read, each with what it is, where it comes from and whether it is
+//! required (`gate: true`: with `[run] require = 'gate'` in the `GAME_DATA` file an unset input fails its test
+//! instead of skipping it). Declared with `primase_testdata::inputs!`; README.md here lists them. Integration tests
+//! reach it with `mod inputs;`, and tests/real_data_inputs.rs checks that every query the tests write is declared
 //! here. Declare an input here when a test first asks for it.
 
 primase_testdata::inputs! {
@@ -10,7 +10,7 @@ primase_testdata::inputs! {
     }
     installs {
         Skate {
-            about: "the skate. install the ReSkate tools use (`Data`: its `layout.toc`, TOCs and CAS archives; the Oodle 9 DLL)",
+            about: "the skate. install (`Data`: its `layout.toc`, TOCs and CAS archives; the Oodle 9 DLL)",
             source: "the user's own install",
             gate: true,
         },
@@ -40,12 +40,12 @@ primase_testdata::inputs! {
     }
     oracle_sets {
         Baseline = "baseline" {
-            about: "our own earlier outputs kept to detect change (an earlier exporter's scene, a map our writer built, a frozen stage result)",
-            source: "regression baselines: our own earlier outputs, not independent oracles",
+            about: "earlier outputs kept to detect change (the mod files ReSkate Studio wrote, for example)",
+            source: "regression baselines: outputs of a producer under test, not independent references",
         },
         Corpus = "corpus" {
-            about: "the games' own files cut from their installs (shader containers, EBX documents, Havok tagfiles, DCX files, CAS frames)",
-            source: "the user's own installs: files extracted as stored",
+            about: "the game's own files cut from its install (EBX documents, CAS frames)",
+            source: "the user's own install: files extracted as stored",
         },
     }
     declared {
@@ -58,14 +58,14 @@ primase_testdata::inputs! {
         Query::Oracle(OracleSet::Baseline, Game::Skate, "fbmod") => {
             status: Live,
             gate: false,
-            about: r#"a folder of `.fbmod` files (searched recursively); each is read, written again byte for byte and every payload decoded (`tools.oodle9` for Oodle blocks); tests/fbmod.rs. The costume files among them (top level, with Studio's `<name>.readback.glb` beside them when present) also gate the costume steps with `installs.skate/Data`: worlds/reskate/tests/costume.rs"#,
-            source: r#"ReSkate Studio 2026-10-12 `cosmetic-mesh-import` output: our own producer's files, a round-trip baseline, not an oracle"#,
+            about: r#"a folder of `.fbmod` files (searched recursively); each is read, written again byte for byte and every payload decoded (`tools.oodle9` for Oodle blocks); tests/fbmod.rs. The files at the top level are also read by primase's costume tests (https://github.com/Kalmarv/primase/tree/main/worlds/reskate/tests/costume.rs)"#,
+            source: r#"ReSkate Studio 2026-10-12 `cosmetic-mesh-import` output: a round-trip baseline, not an independent reference"#,
         },
         Query::Oracle(OracleSet::Corpus, Game::Skate, "cas") => {
             status: Live,
             gate: true,
             about: r#"directory of indexed individual `.casblock` frames"#,
-            source: r#"the game's own CAS frames from the user's install: worlds/reskate/examples/corpus_skate_cas.rs (one Oodle block per frame, 16 entries per superbundle TOC)"#,
+            source: r#"the game's own CAS frames from the user's install, cut by primase's example https://github.com/Kalmarv/primase/tree/main/worlds/reskate/examples/corpus_skate_cas.rs (one Oodle block per frame, 16 entries per superbundle TOC)"#,
         },
         Query::Oracle(OracleSet::Corpus, Game::Skate, "ebx") => {
             status: Live,

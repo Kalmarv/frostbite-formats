@@ -1,15 +1,63 @@
-//! Readers and writers for the Frostbite containers of skate. (ReSkate): superbundle TOCs, bundle regions and
-//! manifests, the native DB, data folders and CAS archives, `.fbmod` mods, shader block depots, the shader lookup
-//! tables of `dingolevel_root`, shader permutations, binding sets and input layouts, MeshSet, physics and rigid-mesh
-//! resources, skeletons, texture headers, and EBX documents (read into typed values, written again, and carried
-//! between documents).
+//! Readers and writers for the container and resource formats of EA Frostbite as *skate.* (2025) stores them: bytes
+//! in, plain records out, and the same records back to bytes.
 //!
-//! It covers the Frostbite generation skate. uses (its build of the containers and their versions, as ReSkate Studio
-//! and the game write them); other Frostbite titles are not assumed to match.
+//! # What it reads
 //!
-//! Every reader is strict (it walks to the exact end of what it reads and rejects anything it does not know) and
-//! every writer is the counterpart of the reader: an unmodified Patch read and written again is byte-identical.
-//! Bytes go in and plain records come out; the crate holds no game data and no keys.
+//! - **Archives and bundles:** superbundle TOCs ([`toc`]), a bundle's file table and manifest ([`bundle`]), CAS
+//!   archives, block by block and decoded ([`cas`]), the native DB behind `layout.toc` ([`db`]), a data folder
+//!   and the bundles it holds ([`folder`], [`listing`], [`scope`]), and ReSkate Studio's `.fbmod` mods ([`fbmod`]).
+//! - **EBX documents:** read into typed values, written again, and carried between documents ([`ebx`]).
+//! - **Shaders:** block depots ([`depot`]), the program and texture lookup tables ([`lookup`]), the permutation
+//!   selector ([`selector`]), permutations and their fixed-function state ([`permutation`]), binding sets
+//!   ([`binding`]), input layouts ([`inputlayout`]) and compiled bytecode containers ([`bytecode`]).
+//! - **Geometry and animation:** MeshSets ([`meshset`]), rigid meshes built from triangles ([`rigid`]), the packed
+//!   tangent frame ([`tangent`]), physics resources ([`physics`]), skeleton assets ([`skeleton`]) and texture
+//!   headers ([`texture`]).
+//!
+//! It was written against the skate. build installed from the game and against the files ReSkate Studio
+//! (20261012) writes; other Frostbite titles are not assumed to match. It is an independent reader of the stored
+//! format and contains no code from Frosty or FrostyToolsuite. The [`ebx`] module is a port of ReSkate's EBX
+//! reader, writer and merge (GPL-3.0-or-later).
+//!
+//! # Behaviour
+//!
+//! Readers are strict and bounds-checked: they walk to the exact end of what they read and refuse what they do not
+//! know, with an error that names what was being read, the offset and what was expected. They are not yet
+//! guaranteed panic-free on arbitrary bytes (a few arithmetic overflows on stored values panic in debug builds; the
+//! README lists them). Writers are the readers' counterparts: what a reader accepts is written back byte for byte
+//! (TOCs only in the Patch layout, with plain names; an EBX document when it already has the writer's layout), or the
+//! writer says why it cannot. The crate holds no game data and no keys. Oodle-compressed CAS blocks are decoded through the caller's own
+//! handle to the game's Oodle library ([`cas::Cas`]); the library is not shipped.
+//!
+//! # Example
+//!
+//! Build a one-bundle superbundle TOC, read it back, and check that the bundle and chunk lookups resolve:
+//!
+//! ```
+//! use frostbite_formats::bundle;
+//! use frostbite_formats::toc::{self, Loc, TocChunk};
+//!
+//! # fn main() -> Result<(), frostbite_formats::Error> {
+//! let archive = Loc { patch: true, chunk: 0, archive: 1 };
+//! // a bundle whose region lists one file: 16 bytes at offset 0 of the archive
+//! let region = bundle::write_region(&[(archive, 0, 16)], &[]);
+//! let chunk = TocChunk { guid: [7; 16], file: Some((archive, 16, 64)) };
+//!
+//! let bytes = toc::write(&[("win32/levels/demo".to_string(), region)], &[chunk], 0)?;
+//!
+//! let parsed = toc::read(&bytes)?;
+//! toc::verify(&parsed)?;
+//! assert_eq!(parsed.bundles[0].0, "win32/levels/demo");
+//! let (files, _inline_manifest) = bundle::read_region(&parsed.bundles[0].1)?;
+//! assert_eq!(files, [(archive, 0, 16)]);
+//! assert_eq!(parsed.chunks[0].file, Some((archive, 16, 64)));
+//!
+//! // a corrupt file is refused with where and why
+//! let err = toc::read(&bytes[..100]).unwrap_err();
+//! assert!(err.to_string().contains("toc at 0x0"));
+//! # Ok(())
+//! # }
+//! ```
 #![deny(clippy::disallowed_methods, clippy::disallowed_types)]
 
 use primase_foundations::bytes::Endian;
@@ -42,22 +90,28 @@ pub const MESHSET: u32 = 0x49B1_56D4;
 /// Resource type of a texture.
 pub const TEXTURE: u32 = 0x6BDE_20BA;
 
-/// Errors of the post-compile readers and writers: what broke and where.
+/// What went wrong reading or writing a format: the format and offset that broke, a file that could not be opened, a
+/// CAS block that would not decode, or an entry of a kind no reader here reads.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// Bytes that do not hold to the format: what was being read, the offset (within the bytes being read) where it
+    /// went wrong, and what was expected.
     #[error("{what} at {offset:#x}: {detail}")]
     Format {
         what: &'static str,
         offset: usize,
         detail: String,
     },
+    /// A file or folder that could not be read.
     #[error("{}: {source}", path.display())]
     Io {
         path: std::path::PathBuf,
         source: std::io::Error,
     },
+    /// A CAS block that would not decode (or an Oodle library that was needed and not given).
     #[error("cas: {0}")]
     Cas(#[from] primase_foundations::compress::Error),
+    /// Something a lookup needed and the data does not hold (a bundle, a chunk, an archive), named.
     #[error("{0}")]
     Missing(String),
     /// An entry of a kind or form no reader here reads, named.
@@ -65,6 +119,7 @@ pub enum Error {
     Unsupported(String),
 }
 
+/// `Result` with this crate's [`Error`].
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// Frostbite's string hash: DJB2 with xor (`h = 5381`, then `h = h * 33 ^ byte` over the name's bytes, 32 bits), case as
@@ -95,7 +150,7 @@ pub fn bad(what: &'static str, offset: usize, detail: impl Into<String>) -> Erro
     }
 }
 
-/// A read past the data ([`primase_bytes`]): `what`'s error at the read's offset, naming how many bytes it wanted and
+/// A read past the data: `what`'s error at the read's offset, naming how many bytes it wanted and
 /// the `total` there are (a span whose end overflows the address space wants all it names).
 pub(crate) fn past_end(
     what: &'static str,
@@ -127,50 +182,63 @@ impl From<primase_foundations::bytes::BoundsError> for Error {
     }
 }
 
-/// Bounds-checked fixed-size reads, little and big endian.
+/// Bounds-checked fixed-size reads, little and big endian: every read past the end is an [`Error::Format`] that names
+/// `what` and the offset.
 #[derive(Debug)]
 pub struct Rd<'a> {
+    /// The bytes being read.
     pub data: &'a [u8],
+    /// What they are, for error messages.
     pub what: &'static str,
 }
 
 impl<'a> Rd<'a> {
+    /// Reads over `data`; `what` names the thing being read in every error.
     pub fn new(data: &'a [u8], what: &'static str) -> Self {
         Self { data, what }
     }
 
+    /// `n` bytes at `at`.
     pub fn bytes(&self, at: usize, n: usize) -> Result<&'a [u8]> {
         primase_foundations::bytes::View::new(self.data)
             .slice(at, n)
             .map_err(|e| past_end(self.what, e, self.data.len()))
     }
 
+    /// `N` bytes at `at` as an array.
     pub fn arr<const N: usize>(&self, at: usize) -> Result<[u8; N]> {
         primase_foundations::bytes::View::new(self.data)
             .array(at)
             .map_err(|e| past_end(self.what, e, self.data.len()))
     }
 
+    /// The byte at `at`.
     pub fn u8(&self, at: usize) -> Result<u8> {
         primase_foundations::bytes::View::new(self.data)
             .u8(at)
             .map_err(|e| past_end(self.what, e, self.data.len()))
     }
+    /// The little-endian `u16` at `at`.
     pub fn u16le(&self, at: usize) -> Result<u16> {
         self.number(at, Endian::Little, primase_foundations::bytes::View::u16)
     }
+    /// The little-endian `u32` at `at`.
     pub fn u32le(&self, at: usize) -> Result<u32> {
         self.number(at, Endian::Little, primase_foundations::bytes::View::u32)
     }
+    /// The little-endian `u64` at `at`.
     pub fn u64le(&self, at: usize) -> Result<u64> {
         self.number(at, Endian::Little, primase_foundations::bytes::View::u64)
     }
+    /// The big-endian `u32` at `at`.
     pub fn u32be(&self, at: usize) -> Result<u32> {
         self.number(at, Endian::Big, primase_foundations::bytes::View::u32)
     }
+    /// The big-endian `i32` at `at`.
     pub fn i32be(&self, at: usize) -> Result<i32> {
         self.number(at, Endian::Big, primase_foundations::bytes::View::i32)
     }
+    /// The big-endian `u64` at `at`.
     pub fn u64be(&self, at: usize) -> Result<u64> {
         self.number(at, Endian::Big, primase_foundations::bytes::View::u64)
     }

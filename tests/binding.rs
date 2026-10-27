@@ -1,8 +1,7 @@
 //! Binding sets and pass bindings: a hand-laid set read to its groups, parameters and entries, the register rule over
-//! it, the refusals, and the shared data that names the sets; and, on the game's data (the skate. install and its
-//! Oodle 9 library), every binding set and pass binding of the game configuration, level root and customization TOCs
-//! read, and the shaders of the game configuration's permutations compared with the rule: each constant buffer's size
-//! with the group the rule names, each resource with the entry the rule names.
+//! it, the refusals, and the shared data that names the sets. The checks on the game's own data (every binding set
+//! read, and the shaders of the game configuration's permutations compared with the register rule) are in primase's
+//! [`worlds/frostbite/tests/binding.rs`](https://github.com/Kalmarv/primase/tree/main/worlds/frostbite/tests/binding.rs).
 
 #![allow(clippy::unwrap_used)]
 

@@ -26,9 +26,13 @@ pub(crate) fn check_size(actual: usize, expected: usize) -> Result<()> {
 /// A borrowed block, including its physical header offset.
 #[derive(Debug, Clone, Copy)]
 pub struct Block<'a> {
+    /// Where the block's header starts in the stream.
     pub offset: usize,
+    /// The codec byte: 0 raw, 2 zlib, 0x11, 0x15 and 0x19 Oodle.
     pub kind: u8,
+    /// The size of the block once decoded.
     pub decoded_size: usize,
+    /// The stored bytes after the header.
     pub payload: &'a [u8],
 }
 /// Parse one complete CAS stream. Header: decoded size is BE u32 low 24 bits;
@@ -89,6 +93,7 @@ impl Compressor for CasRaw {
 /// and kinds 0x11/0x15/0x19. Unknown kinds are errors with physical offsets.
 #[derive(Debug, Default)]
 pub struct Cas<'a> {
+    /// The Oodle library to decode (and encode) Oodle blocks with; blocks of the other kinds need none.
     pub oodle: Option<&'a Oodle>,
 }
 impl Decompressor for Cas<'_> {

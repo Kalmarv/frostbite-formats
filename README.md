@@ -1,42 +1,113 @@
 # frostbite-formats
 
-Readers and writers for the Frostbite containers of skate. (ReSkate), bytes in and plain records out: superbundle
-TOCs, bundle regions and manifests, CAS archives (decoded and encoded), the native DB, `.fbmod` mods, shader block
-depots, shader lookup tables, permutations, binding sets, input layouts and the selector, MeshSet, physics and rigid
-mesh resources, skeletons, texture headers, a data folder's listing, and EBX documents (read into typed values,
-written again, and carried between documents).
+A Rust library that reads and writes the Frostbite container and resource formats of the game *skate.* (2025): bytes in, plain records out, and the same records back to bytes.
 
-Oodle is the game's own library: the caller loads it and passes the handle where a CAS block needs it.
+It reads the data folder of the game and what modders add to it: superbundle TOCs and `layout.toc`, bundle regions and manifests, CAS archives, EBX documents, shader and material resources, MeshSet and physics resources, skeletons, texture headers, and the `.fbmod` mods that ReSkate Studio writes. It is an independent reader of the stored format, with no code from Frosty or FrostyToolsuite; the EBX module is a port of the EBX code of [ReSkate](https://github.com/Dingo-Shenanigans/ReSkate) (GPL-3.0-or-later).
 
-## EBX gates
+## What it reads and writes
 
-`tests/ebx.rs` has three gates:
+Written against the skate. build installed from the game and the files [ReSkate Studio](https://github.com/Dingo-Shenanigans/ReSkate) (20261012) writes. Other Frostbite titles are not assumed to match.
 
-- **Synthetic baselines** (`tests/fixtures/ebx/*.ebx`): documents laid out from the writer's own layout rules, read to
-  hand-worked values and written back byte for byte. They cover structure and detect regressions; they are not
-  independent correctness evidence.
-- **Carry**: values moved from one document into another keep their instances, imports and arrays through a rewrite.
-- **Real data** (the real-data configuration, CONTRIBUTING.md), with three inputs:
-  - the corpus oracle set's `skate/ebx`: a folder of stock documents extracted from the game's `Data`, mirroring their asset
-    paths (for example `characters/customization/configs/cas_main_bundlereftable.ebx`). Every document must keep
-    every field's value through read -> write -> read.
-  - `tools.reskate_cli` and `installs.skate`: the reference reader and writer, and the game root it reads (the
-    install, whose `Data` folder holds the archives). The writer's byte layout is compared with the reference's own
-    rewrite of each document: where the reference reproduces the stock bytes, ours must too; documents where the
-    reference itself differs from stock are counted and listed by name. This comparison measures agreement with the
-    port's source; value preservation on stock data is the independent check.
-  - One stock document's fields are spot-checked against the reference reader's `ebx-values` decode.
+| module | format |
+| --- | --- |
+| `toc`, `bundle`, `db` | superbundle TOCs (Huffman-coded names in the base game, plain names in Patch TOCs, the perfect-hash tables), a bundle's file table and binary manifest, the native DB behind `layout.toc` |
+| `cas`, `folder`, `listing`, `scope` | CAS archives (raw, zlib and Oodle blocks), a data folder with its archives, the bundles and entries a TOC lists, and ids and names looked up across several bundles |
+| `ebx` | EBX documents (RIFF `EBX`/`EBXS`, REFL or RFL2 reflection) read into typed values, written again, and carried between documents |
+| `fbmod` | `.fbmod` mods in the layout ReSkate Studio writes (Frosty mod version 6), payloads included |
+| `depot`, `lookup`, `selector`, `permutation`, `binding`, `inputlayout`, `bytecode` | the shader database: block depots, program and texture lookup tables, the permutation selector, permutations with their fixed-function state, binding sets, input layouts, and the DXBC/DXIL containers of compiled bytecode |
+| `meshset`, `rigid`, `tangent`, `physics`, `skeleton`, `texture` | MeshSets (LODs, sections, vertex declarations), rigid meshes built from triangles, the packed tangent frame, physics resources (with an encoder for triangle meshes), skeleton assets, 180-byte texture headers |
 
-The synthetic baselines and the real-data census are separate tests; the census skips when its inputs are unset.
+Oodle-compressed CAS blocks are decoded through a handle to the game's own Oodle library (`oo2core_9_win64.dll`), which you load and pass in as a [`primase_foundations::compress::oodle::Oodle`](https://github.com/Kalmarv/primase-foundations) (`Oodle::load`; off Windows, `Oodle::portable()` decodes without the library). The library is not shipped here.
 
-### Extracting the corpus
+## Usage
 
-Use the reference reader's own extraction command, which writes the asset's stored bytes:
-
-```text
-reskate_cli ebx-raw <game root> <asset name> <folder>/<asset name>.ebx
+```toml
+[dependencies]
+frostbite-formats = { git = "https://github.com/Kalmarv/frostbite-formats" }
 ```
 
-Take a spread of documents (a level, an object, a bundle reference table). The spot check uses
-`characters/customization/configs/cas_main_bundlereftable` when it is present; its expected values were read from
-`reskate_cli ebx-values <game root> characters/customization/configs/cas_main_bundlereftable`.
+Build a one-bundle superbundle TOC, read it back, and check that the bundle and chunk lookups resolve (this is the example in the crate documentation, run as a doc test):
+
+```rust
+use frostbite_formats::bundle;
+use frostbite_formats::toc::{self, Loc, TocChunk};
+
+fn main() -> Result<(), frostbite_formats::Error> {
+    let archive = Loc { patch: true, chunk: 0, archive: 1 };
+    // a bundle whose region lists one file: 16 bytes at offset 0 of the archive
+    let region = bundle::write_region(&[(archive, 0, 16)], &[]);
+    let chunk = TocChunk { guid: [7; 16], file: Some((archive, 16, 64)) };
+
+    let bytes = toc::write(&[("win32/levels/demo".to_string(), region)], &[chunk], 0)?;
+
+    let parsed = toc::read(&bytes)?;
+    toc::verify(&parsed)?;
+    assert_eq!(parsed.bundles[0].0, "win32/levels/demo");
+    let (files, _inline_manifest) = bundle::read_region(&parsed.bundles[0].1)?;
+    assert_eq!(files, [(archive, 0, 16)]);
+    assert_eq!(parsed.chunks[0].file, Some((archive, 16, 64)));
+
+    // a corrupt file is refused with where and why
+    let err = toc::read(&bytes[..100]).unwrap_err();
+    assert!(err.to_string().contains("toc at 0x0"));
+    Ok(())
+}
+```
+
+To read a real data folder, open it with `folder::Folder::open`, wrap it in a `folder::Source` (with the game's Oodle library), and list a TOC's bundles with `Source::listing`. `examples/list_bundles.rs` does that:
+
+```text
+cargo run --example list_bundles -- <game>/Data Win32/globals.toc <game>/oo2core_9_win64.dll
+```
+
+## What it guarantees
+
+- Reads are checked: every read goes through a bounds-checked reader, and a file that is truncated or does not hold to the format returns an `Error` that names what was being read, the offset and what was expected (`toc at 0x0: envelope is invalid`). Counts read from a file are checked against the bytes that remain before a table is reserved for them (`tests/containers.rs`, `tests/fbmod.rs`), and nesting in the native DB is bounded (`tests/robust.rs`).
+- Readers are strict: they walk to the exact end of what they read and refuse a value they do not know instead of guessing. Fields whose meaning is not known are kept as stored.
+- Writers are the readers' counterparts, and what is read and written again comes back byte for byte. The tests check this on hand-built input for Patch TOCs, bundle regions and manifests, the native DB, shader depots, program lookups and `.fbmod` files, and, when your game files are configured, on the game's own MeshSets, physics resources and texture headers, and on `.fbmod` files written by ReSkate Studio. An EBX document keeps every field's value through a rewrite, and comes back byte for byte when it already has the writer's layout.
+- The crate holds no game data and no keys, and does no I/O except in `folder`, which opens the files of a folder you name.
+
+## What it does not do
+
+- It does not ship, find or download any game file, and it does not ship Oodle.
+- It does not decode pixels, vertices or shader code: it reads the headers, tables and records around them (a texture header, a MeshSet's sections and where their vertices lie in the geometry chunk, the DXBC containers of a bytecode resource).
+- It does not read other Frostbite games, and it is not compatible with Frosty's own project or mod formats beyond the `.fbmod` layout named above.
+- It does not yet promise to be panic-free on arbitrary bytes. Three arithmetic overflows on stored values are known to panic in debug builds: `toc::lookup` (a hash-map entry of `i32::MIN`), `physics::read` (a face offset near `0xFFFF`) and `binding::Group::buffer_end` (an entry near `u32::MAX`). The tests in `tests/robust.rs` cover nesting, Latin-1 names and LOD counts only.
+- Whole files are read into memory; there is no streaming reader.
+
+## Tests
+
+```text
+cargo test --workspace
+```
+
+With no configuration this runs the hand-built tests, the doc test and the synthetic EBX fixtures in `tests/fixtures`; the tests that read your own game files skip, each with one line naming the key it needs.
+
+To run them, write a TOML file and point `GAME_DATA` at it. The format belongs to [primase-testdata](https://github.com/Kalmarv/primase-testdata); this crate reads these keys:
+
+```toml
+[installs]
+skate = 'D:/games/skate'                 # the install: its Data folder holds layout.toc, the TOCs and the CAS archives
+
+[tools]
+oodle9 = 'D:/games/skate/oo2core_9_win64.dll'   # the game's own Oodle library (oodle5 and oodle6 are for the CAS decoder test)
+reskate_cli = 'D:/tools/ReSkateStudio/reskate_cli.exe'   # optional: ReSkate Studio's CLI, the reference EBX reader and writer
+
+[oracles]
+root = 'D:/oracles'    # <root>/corpus/skate/ebx: EBX documents extracted from the game, as stored, under their asset paths
+                       # <root>/corpus/skate/cas: individual `.casblock` frames
+                       # <root>/baseline/skate/fbmod: `.fbmod` files to round-trip
+
+[run]
+require = 'gate'       # optional: an input marked `gate` fails its test instead of skipping
+```
+
+[tests/inputs/README.md](tests/inputs/README.md) lists every input, what it is and where it comes from; it is generated from `tests/inputs/mod.rs`, and `tests/real_data_inputs.rs` fails when the two differ. Only read-only access to your files is needed.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md), including how to report a file this crate cannot read.
+
+## License
+
+GPL-3.0-or-later, see [LICENSE](LICENSE). Used by [primase](https://github.com/Kalmarv/primase), a game-asset conversion library.

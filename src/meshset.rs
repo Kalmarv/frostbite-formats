@@ -1,6 +1,6 @@
 //! MeshSet resources (type 0x49B156D4): the LODs, their sections and vertex declarations, and where each section's
 //! vertices and indices lie in the LOD's geometry chunk. Read ([`read`], [`read_resource`]) and written back
-//! ([`write`]): every MeshSet of the game reads and writes back byte-identical, its resource metadata too
+//! ([`write()`]): every MeshSet of the game reads and writes back byte-identical, its resource metadata too
 //! (`tests/meshset.rs`).
 //!
 //! A MeshSet is one relocatable block: fixed-size records whose pointers (u64, stored relative to byte 16) name a pool
@@ -41,9 +41,13 @@
 use crate::{Rd, Result, bad, capacity};
 
 const W: &str = "meshset";
+/// Bytes in a section record.
 pub const SECTION_SIZE: usize = 384;
+/// Bytes in a vertex declaration.
 pub const DECL_SIZE: usize = 100;
+/// Where a section record's stored declaration starts.
 pub const DECL_AT: usize = 0x70;
+/// Where a section record's draw declaration starts.
 pub const DECL2_AT: usize = 0xd4;
 const KEY_AT: usize = 0x138;
 /// The LOD record pointers (u64) lie from 0x30 up to the name at 0x68 (Studio refuses more: `mesh LOD count must be
@@ -63,8 +67,8 @@ pub mod usage {
     pub const TANGENT_SPACE: u8 = 52;
 }
 
-/// Element formats (Frostbite's VertexElementFormat, numbered as FrostySdk names them) and their sizes in bytes. The
-/// census gate checks every element of the base game against its stream stride with these sizes.
+/// Element formats (Frostbite's VertexElementFormat, with the numbering Frosty's SDK uses) and their sizes in bytes.
+/// `tests/meshset.rs` checks every element of the base game against its stream stride with these sizes.
 pub mod format {
     pub const FLOAT2: u8 = 0x02;
     pub const FLOAT3: u8 = 0x03;
@@ -74,6 +78,7 @@ pub mod format {
     pub const UBYTE4: u8 = 0x0c;
     pub const UBYTE4N: u8 = 0x0d;
     pub const USHORT4: u8 = 0x17;
+    /// The size in bytes of an element of format `f`, `None` for a format not listed.
     pub fn size(f: u8) -> Option<usize> {
         Some(match f {
             0x32 => 1,               // UByteN
@@ -99,6 +104,7 @@ pub mod format {
     }
 }
 
+/// One element of a vertex declaration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Element {
     pub usage: u8,
@@ -107,7 +113,7 @@ pub struct Element {
     pub stream: u8,
 }
 
-/// A vertex declaration, decoded, and its stored bytes ([`write`] writes the bytes; the elements and strides are
+/// A vertex declaration, decoded, and its stored bytes ([`write()`] writes the bytes; the elements and strides are
 /// their reading).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Decl {
@@ -127,6 +133,7 @@ impl Default for Decl {
 }
 
 impl Decl {
+    /// Decode a stored declaration. Refused: more than 16 elements or streams.
     pub fn read(b: &[u8; DECL_SIZE]) -> Result<Self> {
         let (ne, ns) = (b[96] as usize, b[97] as usize);
         if ne > 16 || ns > 16 {
@@ -147,19 +154,22 @@ impl Decl {
             bytes: *b,
         })
     }
+    /// The sum of the stream strides: the bytes of one vertex.
     pub fn stride(&self) -> usize {
         self.strides.iter().map(|&s| s as usize).sum()
     }
+    /// The first element of `usage`.
     pub fn element(&self, usage: u8) -> Option<Element> {
         self.elements.iter().copied().find(|e| e.usage == usage)
     }
 }
 
+/// One section of a LOD: a material's run of vertices and indices, with its vertex layout.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Section {
     /// Offset of the section record in the payload it was read from.
     pub at: usize,
-    /// The record as stored ([`SECTION_SIZE`] bytes), its pointers zero: [`write`] writes its pointers and the fields
+    /// The record as stored ([`SECTION_SIZE`] bytes), its pointers zero: [`write()`] writes its pointers and the fields
     /// below over it.
     pub record: Vec<u8>,
     /// The material name (+0x08).
@@ -194,11 +204,12 @@ impl Section {
     }
 }
 
+/// One LOD: its sections, section lists, geometry chunk and buffer sizes.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Lod {
     /// Offset of the LOD record in the payload it was read from.
     pub at: usize,
-    /// The record as stored (the header's LOD record size, 16-aligned), its pointers zero: [`write`] writes its
+    /// The record as stored (the header's LOD record size, 16-aligned), its pointers zero: [`write()`] writes its
     /// pointers and the fields below over it.
     pub record: Vec<u8>,
     /// The LOD's name (+0x8c), and its parts +0x94 and +0x9c.
@@ -218,9 +229,10 @@ pub struct Lod {
     pub bone_map: Option<Vec<u32>>,
 }
 
+/// A MeshSet as read: the records as stored, with the typed fields, names and tables decoded beside them.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MeshSet {
-    /// The header as stored ([`HEADER`] or [`HEADER_BONES`] bytes), its pointers zero: [`write`] writes its counts
+    /// The header as stored ([`HEADER`] or [`HEADER_BONES`] bytes), its pointers zero: [`write()`] writes its counts
     /// and pointers over it.
     pub header: Vec<u8>,
     /// The MeshSet's name (0x68), and its last part (0x70).
@@ -244,13 +256,19 @@ impl MeshSet {
 
 /// Header sizes: without and with bone bounds.
 pub const HEADER: usize = 0xd0;
+/// Header size with bone bounds.
 pub const HEADER_BONES: usize = 0xe0;
 /// LOD record sizes: plain, with each section's bone mask, with a bone map.
 pub const LOD_PLAIN: usize = 0xb0;
+/// LOD record size with a bone mask per section.
 pub const LOD_MASKS: usize = 0xb8;
+/// LOD record size with a bone map.
 pub const LOD_MAP: usize = 0xbc;
+/// Section index lists per LOD.
 pub const LISTS: usize = 5;
+/// Bytes in a section's bone mask.
 pub const MASK: usize = 24;
+/// Bytes in a stored bone bound.
 pub const BOUNDS: usize = 32;
 
 /// A stored bone bound as its minimum and maximum.
@@ -301,7 +319,7 @@ fn ptr(r: &Rd, at: usize) -> Result<usize> {
 }
 
 /// A record's bytes with its pointer fields (u64 at `fields`) zero: where they point is the layout's, which
-/// [`write`] lays out anew.
+/// [`write()`] lays out anew.
 fn without_pointers(b: &[u8], fields: &[usize]) -> Vec<u8> {
     let mut v = b.to_vec();
     for &f in fields {
@@ -582,7 +600,7 @@ fn pointer_fields(m: &MeshSet, lod_at: &[usize], sec_at: &[Vec<usize>]) -> Vec<u
 
 /// [`read`], and the data after the relocation table that the resource metadata `meta` sizes. Refused when the
 /// metadata does not place the relocation table where it lies, or the table does not list exactly the records'
-/// pointers (in any order: the game's own files list them in the module documentation's order, which [`write`]
+/// pointers (in any order: the game's own files list them in the module documentation's order, which [`write()`]
 /// keeps; ReSkate Studio's in its template's).
 pub fn read_resource(d: &[u8], meta: &[u8; 16]) -> Result<MeshSet> {
     let mut m = read(d)?;

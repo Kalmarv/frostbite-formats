@@ -19,6 +19,7 @@ pub struct Scope<'a> {
 }
 
 impl<'a> Scope<'a> {
+    /// Index `bundles` (in lookup order); where two hold the same id or name the earlier wins.
     pub fn new(bundles: &'a [Bundle]) -> Self {
         let (mut permutations, mut bytecode) = (HashMap::new(), HashMap::new());
         for (b, bundle) in bundles.iter().enumerate() {

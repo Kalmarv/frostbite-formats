@@ -27,8 +27,10 @@ fn io(path: &Path) -> impl FnOnce(std::io::Error) -> Error + '_ {
     }
 }
 
+/// A data folder opened for reading: its TOCs, its CAS archives and the install chunks that name them.
 #[derive(Debug)]
 pub struct Folder {
+    /// The folder, as given to [`Folder::open`].
     pub root: PathBuf,
     /// TOC paths relative to the folder, `/`-separated, sorted.
     pub tocs: Vec<String>,
@@ -52,6 +54,8 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
 }
 
 impl Folder {
+    /// Open the folder `root` (the one that holds `layout.toc` and `Win32`): finds its TOCs and CAS archives and
+    /// reads the install chunks of its `layout.toc`.
     pub fn open(root: impl Into<PathBuf>) -> Result<Self> {
         let root = root.into();
         let win = root.join("Win32");
@@ -116,6 +120,7 @@ impl Folder {
         })
     }
 
+    /// The path of the TOC `rel` (relative to the folder, as in [`Folder::tocs`]).
     pub fn toc_path(&self, rel: &str) -> PathBuf {
         self.root.join(rel)
     }
@@ -126,6 +131,7 @@ impl Folder {
         toc::read(&fs::read(&path).map_err(io(&path))?)
     }
 
+    /// The CAS archive a [`Loc`] names, if the folder has it.
     pub fn archive(&self, loc: Loc) -> Option<&Path> {
         let dir = self.chunk_dirs.get(&loc.chunk)?;
         self.archives
@@ -155,6 +161,7 @@ impl Folder {
         Ok((next, p))
     }
 
+    /// The `size` stored bytes at `off` of the archive `loc` names.
     pub fn read(&self, (loc, off, size): FileRef) -> Result<Vec<u8>> {
         let path = self
             .archive(loc)
@@ -178,12 +185,16 @@ impl Folder {
 /// payloads are decoded with the game's own Oodle when they use it.
 #[derive(Debug)]
 pub struct Source<'a> {
+    /// The folder to read, which holds the TOCs asked about.
     pub folder: &'a Folder,
+    /// The game's own `Data` folder, where `folder` is a Patch folder.
     pub base: Option<&'a Folder>,
+    /// The game's Oodle library, for payloads that use it.
     pub oodle: Option<&'a Oodle>,
 }
 
 impl Source<'_> {
+    /// The stored bytes of a file a bundle region points at, from the folder or the base game.
     pub fn raw(&self, f: FileRef) -> Result<Vec<u8>> {
         if f.0.patch {
             self.folder.read(f)
@@ -201,7 +212,7 @@ impl Source<'_> {
     }
 
     /// The bundle's manifest and the index of its first asset file, read the way ReSkate's merge reads it: inline
-    /// in the region (its assets then no more than the region's files: [`fits`]), else the region file that is a
+    /// in the region (its assets then no more than the region's files), else the region file that is a
     /// manifest (raw or CAS-framed) whose asset count matches.
     pub fn manifest(&self, files: &[FileRef], inline: &[u8]) -> Result<Option<(Manifest, usize, Vec<u8>)>> {
         if !inline.is_empty() {

@@ -1,8 +1,12 @@
-# primase-frostbite
+# frostbite-formats
 
-Frostbite containers and documents, as the game and its tooling use them: superbundle TOCs, bundle regions and
-manifests, the native DB, data folders and CAS archives, shader block depots, shader lookup tables, and EBX documents
-(read into typed values, written again, and carried between documents).
+Readers and writers for the Frostbite containers of skate. (ReSkate), bytes in and plain records out: superbundle
+TOCs, bundle regions and manifests, CAS archives (decoded and encoded), the native DB, `.fbmod` mods, shader block
+depots, shader lookup tables, permutations, binding sets, input layouts and the selector, MeshSet, physics and rigid
+mesh resources, skeletons, texture headers, a data folder's listing, and EBX documents (read into typed values,
+written again, and carried between documents).
+
+Oodle is the game's own library: the caller loads it and passes the handle where a CAS block needs it.
 
 ## EBX gates
 

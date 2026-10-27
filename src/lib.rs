@@ -1,12 +1,15 @@
-//! Frostbite containers as skate. (ReSkate) reads and writes them: superbundle TOCs, bundle regions and manifests,
-//! the native DB, data folders and CAS archives, shader block depots, the shader lookup tables of
-//! `dingolevel_root`, and EBX documents.
+//! Readers and writers for the Frostbite containers of skate. (ReSkate): superbundle TOCs, bundle regions and
+//! manifests, the native DB, data folders and CAS archives, `.fbmod` mods, shader block depots, the shader lookup
+//! tables of `dingolevel_root`, shader permutations, binding sets and input layouts, MeshSet, physics and rigid-mesh
+//! resources, skeletons, texture headers, and EBX documents (read into typed values, written again, and carried
+//! between documents).
 //!
-//! It covers the Frostbite generation skate. uses (its build of the containers and their versions, as Studio and
-//! ReSkate write them); other Frostbite titles are not assumed to match.
+//! It covers the Frostbite generation skate. uses (its build of the containers and their versions, as ReSkate Studio
+//! and the game write them); other Frostbite titles are not assumed to match.
 //!
 //! Every reader is strict (it walks to the exact end of what it reads and rejects anything it does not know) and
 //! every writer is the counterpart of the reader: an unmodified Patch read and written again is byte-identical.
+//! Bytes go in and plain records come out; the crate holds no game data and no keys.
 #![deny(clippy::disallowed_methods, clippy::disallowed_types)]
 
 use primase_foundations::bytes::Endian;
@@ -15,28 +18,24 @@ pub mod binding;
 pub mod bundle;
 pub mod bytecode;
 pub mod cas;
-pub mod components;
 pub mod db;
 pub mod depot;
 pub mod ebx;
 pub mod fbmod;
-pub mod geometry;
+pub mod folder;
 pub mod inputlayout;
+pub mod listing;
 pub mod lookup;
 pub mod meshset;
-pub mod passes;
 pub mod permutation;
 pub mod physics;
-mod read;
 pub mod rigid;
+pub mod scope;
 pub mod selector;
 pub mod skeleton;
 pub mod tangent;
 pub mod texture;
 pub mod toc;
-
-pub use read::cas_codec::Cas;
-pub use read::{entry, folder, listing, program, textures};
 
 /// Resource type of a MeshSet.
 pub const MESHSET: u32 = 0x49B1_56D4;
@@ -77,7 +76,7 @@ pub fn djb2(name: &str) -> u32 {
 }
 
 /// Lowercase hexadecimal of `bytes`, in the order given.
-pub(crate) fn hex(bytes: &[u8]) -> String {
+pub fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write;
     bytes
         .iter()
@@ -98,17 +97,11 @@ pub fn bad(what: &'static str, offset: usize, detail: impl Into<String>) -> Erro
 
 /// A read past the data ([`primase_bytes`]): `what`'s error at the read's offset, naming how many bytes it wanted and
 /// the `total` there are (a span whose end overflows the address space wants all it names).
-pub(crate) fn past_end(
-    what: &'static str,
-    e: primase_foundations::bytes::BoundsError,
-    total: usize,
-) -> Error {
+pub(crate) fn past_end(what: &'static str, e: primase_foundations::bytes::BoundsError, total: usize) -> Error {
     let at = usize::try_from(e.absolute()).unwrap_or(usize::MAX);
     let length = match e {
         primase_foundations::bytes::BoundsError::OutOfBounds { length, .. } => length,
-        primase_foundations::bytes::BoundsError::LengthOverflow { count, stride, .. } => {
-            count.saturating_mul(stride)
-        }
+        primase_foundations::bytes::BoundsError::LengthOverflow { count, stride, .. } => count.saturating_mul(stride),
     };
     bad(what, at, format!("{length} bytes past the end ({total} bytes)"))
 }

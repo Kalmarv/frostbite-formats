@@ -1,6 +1,6 @@
 [package]
-name = "rage-engine-formats"
-description = "RAGE engine formats as GTA V Enhanced stores them: RPF7 archives, resources, META, drawables, textures, collision bounds, clips, shader containers, RBF and XML"
+name = "frostbite-formats"
+description = "Frostbite containers (skate. build): superbundle TOCs, bundles, CAS, the native DB, .fbmod, shader depots and permutations, MeshSet, physics, EBX documents"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,18 +10,13 @@ publish.workspace = true
 
 [dependencies]
 primase-foundations = { workspace = true, features = ["compress"] }
-aes.workspace = true
-indexmap.workspace = true
-quick-xml.workspace = true
-serde.workspace = true
+half.workspace = true
 sha1.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+primase-foundations = { workspace = true, features = ["compress", "reference-decoder"] }
 primase-testdata.workspace = true
-serde_json.workspace = true
-sha1.workspace = true
-sha2.workspace = true
 
 [lints]
 workspace = true

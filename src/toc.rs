@@ -2,11 +2,6 @@
 //! and the chunk table, each found through a perfect hash over its keys (lowercase bundle names, chunk GUIDs).
 //! Base-game TOCs store names Huffman-coded (flag 4); Patch TOCs (the ones in a folder of added or replaced files,
 //! as ReSkate Studio writes it beside the game's `Data`) store them as plain strings, which is what [`write()`] writes.
-#![allow(
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-    clippy::cast_possible_truncation
-)] // lint-todo
 
 use crate::{Error, Rd, Result, align, bad, latin1};
 
@@ -30,10 +25,11 @@ pub struct Loc {
 impl Loc {
     /// A `Loc` from the 64-bit identifier a TOC or region stores.
     pub fn decode(v: u64) -> Self {
+        let [a0, a1, c0, c1, c2, c3, ..] = v.to_le_bytes();
         Self {
             patch: v & (0xFF << 48) != 0,
-            chunk: (v >> 16) as u32,
-            archive: v as u16,
+            chunk: u32::from_le_bytes([c0, c1, c2, c3]),
+            archive: u16::from_le_bytes([a0, a1]),
         }
     }
     /// The 64-bit identifier a TOC or region stores for this `Loc`.
@@ -73,7 +69,7 @@ struct Huffman {
 impl Huffman {
     fn read(r: &Rd, names_at: usize, names_n: usize, table_at: usize, table_n: usize) -> Result<Self> {
         let words = (0..names_n)
-            .map(|i| r.u32be(names_at + 4 * i))
+            .map(|i| r.u32be(crate::at(names_at, i, 4)))
             .collect::<Result<Vec<_>>>()?;
         let mut nodes: Vec<(u32, Option<(usize, usize)>)> = Vec::new();
         // A table entry is a leaf (`!char`: the top bit set) or the counter of an internal node built before it, so the two
@@ -83,12 +79,12 @@ impl Huffman {
         let mut internal = std::collections::BTreeMap::new();
         let (mut left, mut counter, mut root) = (None, 0u32, None);
         for i in 0..table_n {
-            let at = table_at + 4 * i;
+            let at = crate::at(table_at, i, 4);
             let v = r.u32be(at)?;
             let node = if v & LEAF != 0 {
                 *leaves.entry(v).or_insert_with(|| {
                     nodes.push((v, None));
-                    nodes.len() - 1
+                    nodes.len().saturating_sub(1)
                 })
             } else {
                 *internal.get(&v).ok_or_else(|| {
@@ -106,31 +102,41 @@ impl Huffman {
                 continue;
             };
             nodes.push((counter, Some((l, node))));
-            let parent = nodes.len() - 1;
+            let parent = nodes.len().saturating_sub(1);
             internal.insert(counter, parent);
             root = Some(parent);
-            counter += 1;
+            counter = counter.saturating_add(1);
         }
         Ok(Self { words, nodes, root })
     }
 
+    /// The name whose code starts at bit `bit` of the name words.
     fn decode(&self, mut bit: usize) -> Result<String> {
-        let nbits = self.words.len() * 32;
+        let nbits = self.words.len().saturating_mul(32);
         let mut out = String::new();
         let root = self
             .root
             .ok_or_else(|| bad(W, bit / 8, "a name in a TOC with an empty Huffman table"))?;
+        let node = |n: usize, bit: usize| {
+            self.nodes
+                .get(n)
+                .ok_or_else(|| bad(W, bit / 8, format!("Huffman node {n} of {}", self.nodes.len())))
+        };
         while bit < nbits {
             let mut n = root;
-            while let Some((l, r)) = self.nodes[n].1 {
-                if bit >= nbits {
+            while let (_, Some((l, r))) = *node(n, bit)? {
+                let word = self
+                    .words
+                    .get(bit >> 5)
+                    .ok_or_else(|| bad(W, bit / 8, "Huffman name runs past the data"))?;
+                let one = (word >> (bit & 31)) & 1 != 0;
+                n = if one { r } else { l };
+                bit = bit.saturating_add(1);
+                if bit > nbits {
                     return Err(bad(W, bit / 8, "Huffman name runs past the data"));
                 }
-                let one = (self.words[bit >> 5] >> (bit & 31)) & 1 != 0;
-                n = if one { r } else { l };
-                bit += 1;
             }
-            let ch = !self.nodes[n].0 & 0xFFFF;
+            let ch = !node(n, bit)?.0 & 0xFFFF;
             if ch == 0 {
                 return Ok(out);
             }
@@ -169,7 +175,7 @@ pub fn read(data: &[u8]) -> Result<Toc> {
 /// The TOC after its envelope; error offsets are into `data`.
 fn read_body(data: &[u8]) -> Result<Toc> {
     let r = Rd::new(data, W);
-    let u = |i: usize| r.u32be(4 * i);
+    let u = |i: usize| r.u32be(crate::at(0, i, 4));
     let (bho, bdo, cho, cgo, nameso, cdo, flags) = (
         u(0)? as usize,
         u(1)? as usize,
@@ -180,7 +186,8 @@ fn read_body(data: &[u8]) -> Result<Toc> {
         u(11)?,
     );
     let count = |i: usize| -> Result<usize> {
-        usize::try_from(r.i32be(4 * i)?).map_err(|_| bad(W, 4 * i, "count is negative, expected 0 or more"))
+        let at = crate::at(0, i, 4);
+        usize::try_from(r.i32be(at)?).map_err(|_| bad(W, at, "count is negative, expected 0 or more"))
     };
     let (bcount, ccount, dcount) = (count(2)?, count(5)?, count(10)?);
     let huffman = if flags & 4 != 0 {
@@ -200,25 +207,31 @@ fn read_body(data: &[u8]) -> Result<Toc> {
         bundle_hash: Vec::new(),
         chunk_hash: Vec::new(),
     };
-    toc.bundle_hash = (0..bcount).map(|i| r.i32be(bho + 4 * i)).collect::<Result<_>>()?;
+    toc.bundle_hash = (0..bcount)
+        .map(|i| r.i32be(crate::at(bho, i, 4)))
+        .collect::<Result<_>>()?;
     for i in 0..bcount {
-        let at = bdo + 16 * i;
-        let (no, sf, ro) = (r.u32be(at)? as usize, r.u32be(at + 4)?, r.u64be(at + 8)?);
+        let at = crate::at(bdo, i, 16);
+        let (no, sf, ro) = (
+            r.u32be(at)? as usize,
+            r.u32be(at.saturating_add(4))?,
+            r.u64be(at.saturating_add(8))?,
+        );
         if sf >> 30 != 1 {
             return Err(bad(
                 W,
-                at + 4,
+                at.saturating_add(4),
                 format!("bundle region flags {sf:#x}: expected the inline form (bits 31..30 equal to 0b01)"),
             ));
         }
         let name = match &huffman {
             Some(h) => h.decode(no)?,
-            None => r.cstr(nameso + no)?,
+            None => r.cstr(nameso.saturating_add(no))?,
         };
         let ro = usize::try_from(ro).map_err(|_| {
             bad(
                 W,
-                at + 8,
+                at.saturating_add(8),
                 format!("region offset {ro:#x} does not fit the address space"),
             )
         })?;
@@ -226,34 +239,40 @@ fn read_body(data: &[u8]) -> Result<Toc> {
             .push((name, r.bytes(ro, (sf & 0x3FFF_FFFF) as usize)?.to_vec()));
     }
     if ccount != 0 {
-        toc.chunk_hash = (0..ccount).map(|i| r.i32be(cho + 4 * i)).collect::<Result<_>>()?;
+        toc.chunk_hash = (0..ccount)
+            .map(|i| r.i32be(crate::at(cho, i, 4)))
+            .collect::<Result<_>>()?;
         let words = (0..dcount)
-            .map(|i| r.u32be(cdo + 4 * i))
+            .map(|i| r.u32be(crate::at(cdo, i, 4)))
             .collect::<Result<Vec<_>>>()?;
         for i in 0..ccount {
-            let at = cgo + 20 * i;
+            let at = crate::at(cgo, i, 20);
             let mut guid: [u8; 16] = r.arr(at)?;
             guid.reverse();
-            let enc = r.i32be(at + 16)?;
-            if enc == -1 {
+            let ref_at = at.saturating_add(16);
+            let enc = r.i32be(ref_at)?.cast_unsigned();
+            if enc == u32::MAX {
                 toc.chunks.push(TocChunk { guid, file: None });
                 continue;
             }
-            let (flag, w) = ((enc as u32) >> 24, (enc as u32 & 0xFF_FFFF) as usize);
-            if flag != 0x80 || w + 4 > words.len() {
+            let (flag, w) = (enc >> 24, (enc & 0xFF_FFFF) as usize);
+            let record = (flag == 0x80)
+                .then(|| words.get(w..).and_then(|rest| rest.first_chunk::<4>()))
+                .flatten();
+            let Some(&[loc_high, loc_low, offset, size]) = record else {
                 return Err(bad(
                     W,
-                    at + 16,
+                    ref_at,
                     format!(
                         "chunk data reference {enc:#010x}: expected -1 or 0x80 and the index of a 4-word record among the {} data words",
                         words.len()
                     ),
                 ));
-            }
-            let id = (u64::from(words[w]) << 32) | u64::from(words[w + 1]);
+            };
+            let id = (u64::from(loc_high) << 32) | u64::from(loc_low);
             toc.chunks.push(TocChunk {
                 guid,
-                file: Some((Loc::decode(id), words[w + 2], words[w + 3])),
+                file: Some((Loc::decode(id), offset, size)),
             });
         }
     }
@@ -263,14 +282,23 @@ fn read_body(data: &[u8]) -> Result<Toc> {
 /// The TOC's FNV-1: multiply by 0x01000193, xor the sign-extended byte, wrapping; reduced modulo 0x01000193 once at
 /// the end. The tables' default seed is 0x811C9DC5.
 fn hash_with(key: &[u8], seed: u32) -> u32 {
-    key.iter()
-        .fold(seed, |h, &b| h.wrapping_mul(0x01000193) ^ (b as i8 as i32 as u32))
-        % 0x01000193
+    key.iter().fold(seed, |h, &b| {
+        h.wrapping_mul(0x01000193) ^ (b as i8 as i32).cast_unsigned()
+    }) % 0x01000193
+}
+
+/// The slot of `key` among `size` (not 0) under `seed`: its hash modulo the size.
+fn slot(key: &[u8], seed: u32, size: usize) -> usize {
+    usize::try_from(hash_with(key, seed))
+        .ok()
+        .and_then(|h| h.checked_rem(size))
+        .unwrap_or(0)
 }
 
 /// The perfect hash the TOC stores over `keys`: (hash map, key index per slot). Mirrors the game tools: buckets by
 /// first hash, the multi-key buckets largest first (stable) get a seed that separates them, single keys fill free
-/// slots in order, encoded as `-slot - 1`.
+/// slots in order, encoded as `-slot - 1`. An error when the keys are not unique, or when the table is too large for
+/// the 32-bit entries it is stored in.
 pub fn perfect_hash(keys: &[Vec<u8>]) -> Result<(Vec<i32>, Vec<usize>)> {
     let size = keys.len();
     let mut map = vec![-1i32; size];
@@ -284,51 +312,70 @@ pub fn perfect_hash(keys: &[Vec<u8>]) -> Result<(Vec<i32>, Vec<usize>)> {
     if seen.len() != size {
         return Err(bad(W, 0, "perfect-hash keys are not unique"));
     }
-    let first: Vec<usize> = keys
-        .iter()
-        .map(|k| hash_with(k, FNV_SEED) as usize % size)
-        .collect();
+    let too_large = || {
+        bad(
+            W,
+            0,
+            format!("{size} keys do not fit the 32-bit entries of a perfect hash"),
+        )
+    };
+    let first: Vec<usize> = keys.iter().map(|k| slot(k, FNV_SEED, size)).collect();
     let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); size];
     for (i, &s) in first.iter().enumerate() {
-        buckets[s].push(i);
+        if let Some(bucket) = buckets.get_mut(s) {
+            bucket.push(i);
+        }
     }
     buckets.sort_by_key(|b| std::cmp::Reverse(b.len()));
     let mut used = vec![false; size];
-    let mut at = 0;
-    while at < size && buckets[at].len() > 1 {
-        let bucket = &buckets[at];
+    let multi = buckets.iter().take_while(|b| b.len() > 1).count();
+    for bucket in buckets.iter().take(multi) {
         let mut seed = 1u32;
         let slots = loop {
             let mut slots = Vec::with_capacity(bucket.len());
             let ok = bucket.iter().all(|&m| {
-                let s = hash_with(&keys[m], seed) as usize % size;
-                let free = !used[s] && !slots.contains(&s);
+                let s = keys.get(m).map_or(0, |k| slot(k, seed, size));
+                let free = used.get(s) == Some(&false) && !slots.contains(&s);
                 slots.push(s);
                 free
             });
             if ok {
                 break slots;
             }
-            seed += 1;
+            seed = seed
+                .checked_add(1)
+                .ok_or_else(|| bad(W, 0, "no seed separates a bucket of keys"))?;
         };
-        map[first[bucket[0]]] = seed as i32;
-        for (i, &m) in bucket.iter().enumerate() {
-            order[slots[i]] = m;
-            used[slots[i]] = true;
+        let head = bucket.first().and_then(|&m| first.get(m)).copied();
+        if let Some(entry) = head.and_then(|h| map.get_mut(h)) {
+            *entry = i32::try_from(seed).map_err(|_| too_large())?;
         }
-        at += 1;
+        for (&s, &m) in slots.iter().zip(bucket) {
+            if let Some(o) = order.get_mut(s) {
+                *o = m;
+            }
+            if let Some(u) = used.get_mut(s) {
+                *u = true;
+            }
+        }
     }
-    let mut free = 0;
-    while at < size && !buckets[at].is_empty() {
-        while used[free] {
-            free = (free + 1) % size;
+    let mut free = 0usize;
+    for bucket in buckets.iter().skip(multi).take_while(|b| !b.is_empty()) {
+        while used.get(free) == Some(&true) {
+            free = free.saturating_add(1).checked_rem(size).unwrap_or(0);
         }
-        let m = buckets[at][0];
-        map[first[m]] = -(free as i32) - 1;
-        order[free] = m;
-        used[free] = true;
-        free = (free + 1) % size;
-        at += 1;
+        let Some(&m) = bucket.first() else { break };
+        let entry = first.get(m).and_then(|&h| map.get_mut(h));
+        if let Some(entry) = entry {
+            *entry = !i32::try_from(free).map_err(|_| too_large())?;
+        }
+        if let Some(o) = order.get_mut(free) {
+            *o = m;
+        }
+        if let Some(u) = used.get_mut(free) {
+            *u = true;
+        }
+        free = free.saturating_add(1).checked_rem(size).unwrap_or(0);
     }
     Ok((map, order))
 }
@@ -338,12 +385,12 @@ pub fn lookup(map: &[i32], ordered: &[Vec<u8>], key: &[u8]) -> Option<usize> {
     if map.is_empty() || map.len() != ordered.len() {
         return None;
     }
-    let v = map[hash_with(key, FNV_SEED) as usize % map.len()];
+    let v = *map.get(slot(key, FNV_SEED, map.len()))?;
     let i = if v < 0 {
-        // the stored `-slot - 1`, which is `!v`; no negation, so `i32::MIN` is the (absent) slot 2^31 - 1
-        !v as usize
+        // the stored slot is `-slot - 1`, which is `!v`; no negation, so `i32::MIN` names the absent slot 2^31 - 1
+        usize::try_from(!v).ok()?
     } else {
-        hash_with(key, v as u32) as usize % map.len()
+        slot(key, v.cast_unsigned(), map.len())
     };
     (ordered.get(i)? == key).then_some(i)
 }
@@ -352,7 +399,8 @@ fn bundle_key(name: &str) -> Result<Vec<u8>> {
     latin1(&name.to_lowercase(), W)
 }
 
-/// Every bundle and chunk resolves through the stored perfect hashes.
+/// Every bundle and chunk resolves through the stored perfect hashes. The offset of an error is the index of the
+/// bundle or chunk that does not.
 pub fn verify(toc: &Toc) -> Result<()> {
     let keys = toc
         .bundles
@@ -361,24 +409,33 @@ pub fn verify(toc: &Toc) -> Result<()> {
         .collect::<Result<Vec<_>>>()?;
     for (i, k) in keys.iter().enumerate() {
         if lookup(&toc.bundle_hash, &keys, k) != Some(i) {
-            return Err(bad(W, i, "bundle perfect hash does not resolve"));
+            return Err(bad(
+                W,
+                i,
+                "bundle perfect hash does not resolve: expected the name to find its own index",
+            ));
         }
     }
     let keys: Vec<Vec<u8>> = toc.chunks.iter().map(|c| c.guid.to_vec()).collect();
     for (i, k) in keys.iter().enumerate() {
         if lookup(&toc.chunk_hash, &keys, k) != Some(i) {
-            return Err(bad(W, i, "chunk perfect hash does not resolve"));
+            return Err(bad(
+                W,
+                i,
+                "chunk perfect hash does not resolve: expected the GUID to find its own index",
+            ));
         }
     }
     Ok(())
 }
 
 /// A Patch TOC (plain names): bundles and chunks are laid out in perfect-hash order. `flags` must not ask for
-/// Huffman names.
+/// Huffman names. An error when a size or offset does not fit the 32 bits it is stored in.
 pub fn write(bundles: &[(String, Vec<u8>)], chunks: &[TocChunk], flags: u32) -> Result<Vec<u8>> {
     if flags & 4 != 0 {
         return Err(bad(W, 0, "the Patch TOC writer stores plain names"));
     }
+    let w32 = |n: usize| crate::u32_len(W, n);
     let bkeys = bundles
         .iter()
         .map(|(n, _)| bundle_key(n))
@@ -386,88 +443,115 @@ pub fn write(bundles: &[(String, Vec<u8>)], chunks: &[TocChunk], flags: u32) -> 
     let (bmap, border) = perfect_hash(&bkeys)?;
     let ckeys: Vec<Vec<u8>> = chunks.iter().map(|c| c.guid.to_vec()).collect();
     let (cmap, corder) = perfect_hash(&ckeys)?;
+    let bundle_at = |src: usize| {
+        bundles
+            .get(src)
+            .ok_or_else(|| bad(W, src, format!("bundle {src} of {}", bundles.len())))
+    };
     let mut names = Vec::new();
     let mut name_at = Vec::with_capacity(border.len());
     for &src in &border {
         name_at.push(names.len());
-        names.extend(latin1(&bundles[src].0, W)?);
+        names.extend(latin1(&bundle_at(src)?.0, W)?);
         names.push(0);
     }
     let mut words: Vec<u32> = Vec::new();
-    let mut table = Vec::with_capacity(20 * chunks.len());
+    let mut table = Vec::with_capacity(crate::at(0, chunks.len(), 20));
     for &src in &corder {
-        let c = &chunks[src];
+        let c = chunks
+            .get(src)
+            .ok_or_else(|| bad(W, src, format!("chunk {src} of {}", chunks.len())))?;
         table.extend(c.guid.iter().rev());
         match c.file {
             None => table.extend((-1i32).to_be_bytes()),
             Some((loc, off, size)) => {
-                table.extend(((0x80u32 << 24) | words.len() as u32).to_be_bytes());
-                let id = loc.encode();
-                words.extend([(id >> 32) as u32, id as u32, off, size]);
+                table.extend(((0x80u32 << 24) | w32(words.len())?).to_be_bytes());
+                let [a, b, c, d, e, f, g, h] = loc.encode().to_be_bytes();
+                words.extend([
+                    u32::from_be_bytes([a, b, c, d]),
+                    u32::from_be_bytes([e, f, g, h]),
+                    off,
+                    size,
+                ]);
             }
         }
     }
-    let bho = 48;
-    let bdo = align(bho + 4 * bundles.len(), 8);
-    let cho = align(bdo + 16 * bundles.len(), 4);
-    let cgo = align(cho + 4 * chunks.len(), 4);
-    let cdo = align(cgo + table.len(), 4);
-    let nameso = cdo + 4 * words.len();
-    let mut pos = align(nameso + names.len(), 4);
+    let bho = 48usize;
+    let bdo = align(crate::at(bho, bundles.len(), 4), 8);
+    let cho = align(crate::at(bdo, bundles.len(), 16), 4);
+    let cgo = align(crate::at(cho, chunks.len(), 4), 4);
+    let cdo = align(cgo.saturating_add(table.len()), 4);
+    let nameso = crate::at(cdo, words.len(), 4);
+    let mut pos = align(nameso.saturating_add(names.len()), 4);
     let mut region_at = Vec::with_capacity(border.len());
     for &src in &border {
         region_at.push(pos);
-        pos = align(pos + bundles[src].1.len(), 4);
+        pos = align(pos.saturating_add(bundle_at(src)?.1.len()), 4);
     }
-    let mut out = vec![0u8; ENVELOPE + pos];
-    out[..4].copy_from_slice(&MAGIC);
-    let d = &mut out[ENVELOPE..];
-    let put = |d: &mut [u8], at: usize, v: &[u8]| d[at..at + v.len()].copy_from_slice(v);
+    let mut out = vec![0u8; ENVELOPE.saturating_add(pos)];
+    let (envelope, d) = out
+        .split_at_mut_checked(ENVELOPE)
+        .ok_or_else(|| bad(W, 0, "TOC larger than the address space"))?;
+    if let Some(magic) = envelope.get_mut(..4) {
+        magic.copy_from_slice(&MAGIC);
+    }
+    // every write lies inside `d`, which is sized from the same offsets
+    let put = |d: &mut [u8], at: usize, v: &[u8]| -> Result<()> {
+        d.get_mut(at..at.saturating_add(v.len()))
+            .ok_or_else(|| bad(W, at, "internal layout error: write past the TOC"))?
+            .copy_from_slice(v);
+        Ok(())
+    };
     let has_chunks = !chunks.is_empty();
     let head = [
-        bho as u32,
-        bdo as u32,
-        bundles.len() as u32,
-        if has_chunks { cho as u32 } else { 0 },
-        if has_chunks { cgo as u32 } else { 0 },
-        chunks.len() as u32,
-        cdo as u32,
-        cdo as u32,
-        nameso as u32,
-        cdo as u32,
-        words.len() as u32,
+        w32(bho)?,
+        w32(bdo)?,
+        w32(bundles.len())?,
+        if has_chunks { w32(cho)? } else { 0 },
+        if has_chunks { w32(cgo)? } else { 0 },
+        w32(chunks.len())?,
+        w32(cdo)?,
+        w32(cdo)?,
+        w32(nameso)?,
+        w32(cdo)?,
+        w32(words.len())?,
         flags,
     ];
     for (i, v) in head.iter().enumerate() {
-        put(d, 4 * i, &v.to_be_bytes());
+        put(d, crate::at(0, i, 4), &v.to_be_bytes())?;
     }
     for (i, v) in bmap.iter().enumerate() {
-        put(d, bho + 4 * i, &v.to_be_bytes());
+        put(d, crate::at(bho, i, 4), &v.to_be_bytes())?;
     }
     for (i, &src) in border.iter().enumerate() {
-        let region = &bundles[src].1;
+        let region = &bundle_at(src)?.1;
         if region.len() > 0x3FFF_FFFF {
             return Err(bad(W, i, "bundle region exceeds 30 bits"));
         }
-        put(d, bdo + 16 * i, &(name_at[i] as u32).to_be_bytes());
+        let (name, at) = (
+            name_at.get(i).copied().unwrap_or(0),
+            region_at.get(i).copied().unwrap_or(0),
+        );
+        let entry = crate::at(bdo, i, 16);
+        put(d, entry, &w32(name)?.to_be_bytes())?;
         put(
             d,
-            bdo + 16 * i + 4,
-            &((1u32 << 30) | region.len() as u32).to_be_bytes(),
-        );
-        put(d, bdo + 16 * i + 8, &(region_at[i] as u64).to_be_bytes());
-        put(d, region_at[i], region);
+            entry.saturating_add(4),
+            &((1u32 << 30) | w32(region.len())?).to_be_bytes(),
+        )?;
+        put(d, entry.saturating_add(8), &(at as u64).to_be_bytes())?;
+        put(d, at, region)?;
     }
     if has_chunks {
         for (i, v) in cmap.iter().enumerate() {
-            put(d, cho + 4 * i, &v.to_be_bytes());
+            put(d, crate::at(cho, i, 4), &v.to_be_bytes())?;
         }
-        put(d, cgo, &table);
+        put(d, cgo, &table)?;
         for (i, w) in words.iter().enumerate() {
-            put(d, cdo + 4 * i, &w.to_be_bytes());
+            put(d, crate::at(cdo, i, 4), &w.to_be_bytes())?;
         }
     }
-    put(d, nameso, &names);
+    put(d, nameso, &names)?;
     Ok(out)
 }
 

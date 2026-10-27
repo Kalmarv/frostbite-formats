@@ -215,3 +215,17 @@ fn depot_entries_cannot_multiply_one_block() {
     let e = depot::read(&d, &meta).unwrap_err().to_string();
     assert!(e.contains("more than the payload"), "{e}");
 }
+
+/// A pointer to an import the document does not have made `compact` index its import map out of range (a panic); it is
+/// an error naming the pointer, and a pointer to a missing instance is the same.
+#[test]
+fn compacting_a_document_with_a_dangling_pointer_is_an_error() {
+    use frostbite_formats::ebx::{self, Pointer, Value, carry};
+    for dangling in [Pointer::External(9), Pointer::Internal(9)] {
+        let mut doc = ebx::read(include_bytes!("fixtures/ebx/refl.ebx")).unwrap();
+        let root = doc.instances[0].object.as_mut().unwrap();
+        *root.field_mut("child").unwrap() = Value::Pointer(dangling);
+        let e = carry::compact(&mut doc).unwrap_err().to_string();
+        assert!(e.contains("pointer to") && e.contains('9'), "{e}");
+    }
+}

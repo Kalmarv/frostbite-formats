@@ -140,7 +140,7 @@ fn carrying_appends_a_reachable_instance() -> R {
     // Point the root at the carried copy so it is reachable, and check it survives a write.
     let root = to.instances[0].object.as_mut().unwrap();
     *root.field_mut("child").unwrap() = Value::Pointer(Pointer::Internal(2));
-    assert!(!carry::order_exported_first(&mut to));
+    assert!(!carry::order_exported_first(&mut to)?);
 
     let back = ebx::read(&ebx::write(&to)?)?;
     assert_eq!(back.instances.len(), 3);
@@ -166,7 +166,7 @@ fn compact_drops_what_the_root_cannot_reach() -> R {
         c.value(&Value::Pointer(Pointer::Internal(1)))?;
     }
     assert_eq!(to.instances.len(), 3);
-    assert_eq!(carry::compact(&mut to), (2, 0));
+    assert_eq!(carry::compact(&mut to)?, (2, 0));
     assert_eq!(to.instances.len(), 2);
 
     let back = ebx::read(&ebx::write(&to)?)?;
@@ -186,7 +186,7 @@ fn exported_instances_are_ordered_first() -> R {
     let root = doc.instances[1].object.as_mut().unwrap();
     *root.field_mut("child").unwrap() = Value::Pointer(Pointer::Internal(0));
 
-    assert!(carry::order_exported_first(&mut doc));
+    assert!(carry::order_exported_first(&mut doc)?);
     assert!(doc.instances[0].exported);
     assert!(!doc.instances[1].exported);
 

@@ -1,10 +1,5 @@
 //! Moving values between documents and tidying a document after an edit (ReSkate's `ebx_merge.cpp` does the same
 //! when it merges two documents' edits of one asset).
-#![allow(
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-    clippy::cast_possible_truncation
-)] // lint-todo
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{Document, FieldType, FieldValue, Instance, Object, Pointer, Value};
@@ -22,7 +17,9 @@ fn ensure_fixup_type(doc: &mut Document, descriptor: usize) -> Result<u16> {
         .ok_or_else(|| bad(W, 0, "type descriptor is invalid"))?;
     let (g, s) = (t.guid, t.signature);
     let n = doc.fixup_type_guids.len().min(doc.fixup_type_signatures.len());
-    if let Some(i) = (0..n).find(|&i| doc.fixup_type_guids[i] == g && doc.fixup_type_signatures[i] == s) {
+    let known = (doc.fixup_type_guids.iter().zip(&doc.fixup_type_signatures))
+        .position(|(guid, signature)| *guid == g && *signature == s);
+    if let Some(i) = known {
         return u16::try_from(i).map_err(|_| bad(W, 0, "type slot overflow"));
     }
     doc.fixup_type_guids.insert(n, g);
@@ -40,16 +37,50 @@ fn walk_pointers(v: &mut Value, f: &mut dyn FnMut(&mut Pointer)) {
     }
 }
 
+/// Rewrites the pointers of the instances `keep` lists (indices into the document's instances) through `f`, which
+/// gives a pointer's new target and `None` for one that has none; the first pointer without a target is an error.
+fn remap_pointers(
+    doc: &mut Document,
+    keep: &[usize],
+    kind: &'static str,
+    f: &dyn Fn(&Pointer) -> Option<Pointer>,
+) -> Result<()> {
+    let mut missing = None;
+    for &k in keep {
+        let Some(o) = doc.instances.get_mut(k).and_then(|i| i.object.as_mut()) else {
+            continue;
+        };
+        for fv in &mut o.fields {
+            walk_pointers(&mut fv.value, &mut |p| match (f(p), &*p) {
+                (Some(new), _) => *p = new,
+                (None, Pointer::Internal(i) | Pointer::External(i)) => {
+                    missing.get_or_insert(*i);
+                }
+                (None, Pointer::Null) => {}
+            });
+        }
+    }
+    match missing {
+        None => Ok(()),
+        Some(i) => Err(bad(
+            W,
+            i,
+            format!("a pointer to {kind} {i} that the document does not keep or does not have"),
+        )),
+    }
+}
+
 /// Drops the instances nothing reachable from the root (instance 0) points at, and the imports nothing kept uses;
-/// remaps every pointer. -> (instances kept, imports kept)
-pub fn compact(doc: &mut Document) -> (usize, usize) {
+/// remaps every pointer. -> (instances kept, imports kept). An error when a kept instance points at an instance or
+/// import the document does not have.
+pub fn compact(doc: &mut Document) -> Result<(usize, usize)> {
     let mut reach = BTreeSet::new();
     let mut stack = vec![0usize];
     while let Some(k) = stack.pop() {
         if k >= doc.instances.len() || !reach.insert(k) {
             continue;
         }
-        if let Some(o) = doc.instances[k].object.as_mut() {
+        if let Some(o) = doc.instances.get_mut(k).and_then(|i| i.object.as_mut()) {
             for fv in &mut o.fields {
                 walk_pointers(&mut fv.value, &mut |p| {
                     if let Pointer::Internal(i) = p {
@@ -62,7 +93,7 @@ pub fn compact(doc: &mut Document) -> (usize, usize) {
     let keep: Vec<usize> = (0..doc.instances.len()).filter(|k| reach.contains(k)).collect();
     let mut used = BTreeSet::new();
     for &k in &keep {
-        if let Some(o) = doc.instances[k].object.as_mut() {
+        if let Some(o) = doc.instances.get_mut(k).and_then(|i| i.object.as_mut()) {
             for fv in &mut o.fields {
                 walk_pointers(&mut fv.value, &mut |p| {
                     if let Pointer::External(i) = p {
@@ -74,58 +105,50 @@ pub fn compact(doc: &mut Document) -> (usize, usize) {
     }
     let ikeep: Vec<usize> = (0..doc.imports.len()).filter(|i| used.contains(i)).collect();
     let mmap: BTreeMap<usize, usize> = ikeep.iter().enumerate().map(|(n, &o)| (o, n)).collect();
-    for &k in &keep {
-        if let Some(o) = doc.instances[k].object.as_mut() {
-            for fv in &mut o.fields {
-                walk_pointers(&mut fv.value, &mut |p| {
-                    if let Pointer::External(i) = p {
-                        *i = mmap[i];
-                    }
-                });
-            }
-        }
-    }
-    rearrange(doc, &keep);
+    remap_pointers(doc, &keep, "import", &|p| match p {
+        Pointer::External(i) => mmap.get(i).map(|&n| Pointer::External(n)),
+        other => Some(*other),
+    })?;
+    rearrange(doc, &keep)?;
     let imports = std::mem::take(&mut doc.imports);
-    doc.imports = ikeep.iter().map(|&i| imports[i]).collect();
-    (keep.len(), ikeep.len())
+    doc.imports = ikeep.iter().filter_map(|&i| imports.get(i).copied()).collect();
+    Ok((keep.len(), ikeep.len()))
 }
 
 /// Puts the exported instances before the internal ones, as the format requires (instances added to a document go at
-/// its end), each group in its own order; remaps every pointer. -> whether any instance moved
-pub fn order_exported_first(doc: &mut Document) -> bool {
-    let n = doc.instances.len();
-    let order: Vec<usize> = (0..n)
-        .filter(|&k| doc.instances[k].exported)
-        .chain((0..n).filter(|&k| !doc.instances[k].exported))
-        .collect();
+/// its end), each group in its own order; remaps every pointer. -> whether any instance moved. An error when an
+/// instance points at an instance the document does not have.
+pub fn order_exported_first(doc: &mut Document) -> Result<bool> {
+    let (exported, internal): (Vec<usize>, Vec<usize>) =
+        (0..doc.instances.len()).partition(|&k| doc.instances.get(k).is_some_and(|i| i.exported));
+    let order: Vec<usize> = exported.into_iter().chain(internal).collect();
     if order.iter().enumerate().all(|(n, &k)| n == k) {
-        return false;
+        return Ok(false);
     }
-    rearrange(doc, &order);
-    true
+    rearrange(doc, &order)?;
+    Ok(true)
 }
 
 /// Keeps the instances `order` lists, in that order, and remaps the internal pointers of the kept ones (each must
-/// point at a kept instance).
-fn rearrange(doc: &mut Document, order: &[usize]) {
+/// point at a kept instance; an error when one does not, or `order` names an instance the document does not have).
+fn rearrange(doc: &mut Document, order: &[usize]) -> Result<()> {
     let imap: BTreeMap<usize, usize> = order.iter().enumerate().map(|(n, &o)| (o, n)).collect();
-    for &k in order {
-        if let Some(o) = doc.instances[k].object.as_mut() {
-            for fv in &mut o.fields {
-                walk_pointers(&mut fv.value, &mut |p| {
-                    if let Pointer::Internal(i) = p {
-                        *i = imap[i];
-                    }
-                });
-            }
-        }
-    }
+    remap_pointers(doc, order, "instance", &|p| match p {
+        Pointer::Internal(i) => imap.get(i).map(|&n| Pointer::Internal(n)),
+        other => Some(*other),
+    })?;
     let mut old = std::mem::take(&mut doc.instances);
-    doc.instances = order
-        .iter()
-        .map(|&k| std::mem::replace(&mut old[k], placeholder()))
-        .collect();
+    let mut moved = Vec::with_capacity(order.len());
+    for &k in order {
+        let Some(slot) = old.get_mut(k) else {
+            // the document is left as it was found
+            doc.instances = old;
+            return Err(bad(W, k, "an instance to keep that the document does not have"));
+        };
+        moved.push(std::mem::replace(slot, placeholder()));
+    }
+    doc.instances = moved;
+    Ok(())
 }
 
 fn placeholder() -> Instance {
@@ -144,9 +167,9 @@ fn placeholder() -> Instance {
 fn fields_by_name(doc: &Document, t: usize) -> Result<BTreeMap<String, usize>> {
     let mut out = BTreeMap::new();
     let mut stack = vec![t];
-    let mut depth = 0;
+    let mut depth = 0usize;
     while let Some(t) = stack.pop() {
-        depth += 1;
+        depth = depth.saturating_add(1);
         if depth > 128 {
             return Err(bad(W, 0, "types nest too deeply"));
         }
@@ -155,8 +178,11 @@ fn fields_by_name(doc: &Document, t: usize) -> Result<BTreeMap<String, usize>> {
             .get(t)
             .ok_or_else(|| bad(W, 0, "type descriptor is invalid"))?;
         let first = usize::try_from(ty.field_index).map_err(|_| bad(W, 0, "field range is invalid"))?;
-        for di in first..first + usize::from(ty.field_count) {
-            let f = &doc.fields[di];
+        for di in first..first.saturating_add(usize::from(ty.field_count)) {
+            let f = doc
+                .fields
+                .get(di)
+                .ok_or_else(|| bad(W, di, format!("field {di} of {}", doc.fields.len())))?;
             if f.ty() == FieldType::Inherited {
                 stack.push(usize::from(f.class_ref));
             } else {
@@ -251,7 +277,7 @@ impl<'a> Carrier<'a> {
             }),
             raw_image: src.raw_image.clone(),
         });
-        let at = self.to.instances.len() - 1;
+        let at = self.to.instances.len().saturating_sub(1);
         if src.exported {
             self.instance_by_guid.entry(src.guid).or_insert(at);
         } else {
@@ -259,12 +285,12 @@ impl<'a> Carrier<'a> {
         }
         let mut copied = self.object(obj)?;
         if src.exported && renumber(&mut copied, &src.guid, from) {
-            self.renumbered += 1;
+            self.renumbered = self.renumbered.saturating_add(1);
         }
-        if let Some(o) = self.to.instances[at].object.as_mut() {
+        if let Some(o) = self.to.instances.get_mut(at).and_then(|i| i.object.as_mut()) {
             o.fields = copied.fields;
         }
-        self.instances += 1;
+        self.instances = self.instances.saturating_add(1);
         Ok(at)
     }
 
@@ -278,7 +304,7 @@ impl<'a> Carrier<'a> {
             return Ok(at);
         }
         self.to.imports.push(r);
-        Ok(self.to.imports.len() - 1)
+        Ok(self.to.imports.len().saturating_sub(1))
     }
 
     /// `src` (an object of `from`) as an object of `to`, with what it points at carried along.
@@ -288,18 +314,21 @@ impl<'a> Carrier<'a> {
             let m = fields_by_name(self.to, t)?;
             self.fields.insert(t, m);
         }
+
         let mut out = Object {
             descriptor: t,
             fields: Vec::with_capacity(src.fields.len()),
         };
         for f in &src.fields {
-            let descriptor = *self.fields[&t].get(&f.name).ok_or_else(|| {
-                bad(
-                    W,
-                    0,
-                    format!("the target's {} has no field {}", self.to.types[t].name, f.name),
-                )
-            })?;
+            let descriptor = self
+                .fields
+                .get(&t)
+                .and_then(|m| m.get(&f.name))
+                .copied()
+                .ok_or_else(|| {
+                    let type_name = self.to.types.get(t).map_or("?", |ty| ty.name.as_str());
+                    bad(W, 0, format!("the target's {type_name} has no field {}", f.name))
+                })?;
             out.fields.push(FieldValue {
                 descriptor,
                 name: f.name.clone(),
@@ -331,8 +360,18 @@ impl<'a> Carrier<'a> {
     }
 }
 
-fn object_id(guid: &[u8; 16]) -> u32 {
-    u32::from_le_bytes([guid[0], guid[1], guid[2], guid[3]])
+/// The object id an instance's GUID carries: its first four bytes.
+pub(super) fn object_id(guid: &[u8; 16]) -> u32 {
+    guid.first_chunk::<4>().map_or(0, |id| u32::from_le_bytes(*id))
+}
+
+/// The 32-bit `Flags` word a value holds (an `Int` holds it sign-extended); `None` for a value that is no such word.
+pub(super) fn flags_word(v: &Value) -> Option<u32> {
+    match *v {
+        Value::Int(i) => i32::try_from(i).ok().map(i32::cast_unsigned),
+        Value::UInt(u) => u32::try_from(u).ok(),
+        _ => None,
+    }
 }
 
 /// An exported instance carried from another document gets the object id of its own GUID in its `Flags`, when the
@@ -341,10 +380,8 @@ fn renumber(obj: &mut Object, guid: &[u8; 16], source: &Document) -> bool {
     let Some(f) = obj.fields.iter_mut().find(|f| f.name == "Flags") else {
         return false;
     };
-    let current = match f.value {
-        Value::Int(i) => i as u32,
-        Value::UInt(u) => u as u32,
-        _ => return false,
+    let Some(current) = flags_word(&f.value) else {
+        return false;
     };
     let new = (current & !OBJECT_ID_MASK) | (object_id(guid) & OBJECT_ID_MASK);
     if new == current {
@@ -358,7 +395,7 @@ fn renumber(obj: &mut Object, guid: &[u8; 16], source: &Document) -> bool {
         return false;
     }
     f.value = match f.value {
-        Value::Int(_) => Value::Int(i64::from(new as i32)),
+        Value::Int(_) => Value::Int(i64::from(new.cast_signed())),
         _ => Value::UInt(u64::from(new)),
     };
     true

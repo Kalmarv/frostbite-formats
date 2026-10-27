@@ -6,6 +6,7 @@
 //! GUIDs outside the map (type GUIDs, references to other documents) stay.
 use std::collections::HashMap;
 
+use super::carry::{flags_word, object_id};
 use super::{Document, Value};
 
 /// The object id bits of an exported instance's `Flags` (the low bits of its GUID, as [`super::carry`] keeps them).
@@ -61,10 +62,6 @@ fn replace_bytes(bytes: &mut [u8], map: &HashMap<[u8; 16], [u8; 16]>) -> usize {
     n
 }
 
-fn object_id(guid: &[u8; 16]) -> u32 {
-    guid.first_chunk::<4>().map_or(0, |id| u32::from_le_bytes(*id))
-}
-
 /// Gives every GUID of `doc` that is a key of `map` its value (the module documentation's places). An exported
 /// instance whose `Flags` held its old GUID's object id gets the new one's. How many places changed.
 pub fn remap(doc: &mut Document, map: &HashMap<[u8; 16], [u8; 16]>) -> usize {
@@ -106,13 +103,7 @@ fn renumber(obj: &mut super::Object, old: &[u8; 16], new: &[u8; 16]) {
     let Some(f) = obj.fields.iter_mut().find(|f| f.name == "Flags") else {
         return;
     };
-    let current = match f.value {
-        // `Flags` is a 32-bit word; an `Int` holds it sign-extended
-        Value::Int(i) => i32::try_from(i).ok().map(i32::cast_unsigned),
-        Value::UInt(u) => u32::try_from(u).ok(),
-        _ => None,
-    };
-    let Some(current) = current else {
+    let Some(current) = flags_word(&f.value) else {
         return;
     };
     if current & OBJECT_ID_MASK != object_id(old) & OBJECT_ID_MASK {
@@ -120,7 +111,7 @@ fn renumber(obj: &mut super::Object, old: &[u8; 16], new: &[u8; 16]) {
     }
     let next = (current & !OBJECT_ID_MASK) | (object_id(new) & OBJECT_ID_MASK);
     f.value = match f.value {
-        Value::Int(_) => Value::Int(i64::from(next as i32)),
+        Value::Int(_) => Value::Int(i64::from(next.cast_signed())),
         _ => Value::UInt(u64::from(next)),
     };
 }

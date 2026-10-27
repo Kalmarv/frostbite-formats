@@ -17,11 +17,15 @@ pub const ROOT: &str = "AntSkeletonAsset";
 /// One joint of a skeleton asset, as stored.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SkeletonJoint {
+    /// The joint's name, read from the asset's `NameTable` at the joint's `Name` offset.
     pub name: String,
     /// The FNV-1 hash of the name, as stored (checked).
     pub name_hash: u32,
+    /// Index of the parent joint; `None` for a root (stored as -1). Always below the joint count.
     pub parent: Option<u32>,
+    /// Index of the first child joint; `None` for a leaf (stored as -1).
     pub child: Option<u32>,
+    /// Index of the next sibling joint; `None` for the last (stored as -1).
     pub sibling: Option<u32>,
     /// The joint's `Type`, as stored.
     pub kind: i64,

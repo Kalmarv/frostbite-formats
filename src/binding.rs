@@ -40,32 +40,45 @@ const GROUP: usize = 0x40;
 /// One parameter of a group: the same record a depot block's parameter starts with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Param {
+    /// Name hash of the parameter (u64 at +0).
     pub name: u64,
+    /// Type hash (u32 at +8); the same type ids as a depot block's parameters.
     pub ty: u32,
+    /// Element count (u16 at +12).
     pub count: u16,
+    /// The u16 at +14, kept as stored; its meaning is not known.
     pub extra: u16,
 }
 
 /// A parameter's entry: where it lies (a constant buffer's byte offset, a resource group's index) and its kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Entry {
+    /// For a constant-buffer group, the parameter's byte offset in the buffer (`u32::MAX` when it has none); for a resource group, the resource's index.
     pub at: u32,
+    /// The u16 at +4 of the entry: `0xFFFF` on every entry of a constant-buffer group, 0 or 1 elsewhere. Kept as stored.
     pub marker: u16,
+    /// The u16 at +6 of the entry: for a constant-buffer group its size in bytes times four, otherwise a code kept as stored.
     pub kind: u16,
 }
 
+/// One group of a [`Set`]: either the layout of a constant buffer or a list of resources, with its parameters and one entry per parameter.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Group {
+    /// The group's name hash (u64 at +0).
     pub name: u64,
     /// The word at +0x08: the buffer size rounded up to 16 for a constant-buffer group, a count for a resource group.
     pub size: u32,
+    /// The four flag bytes at +0x0c, kept as stored.
     pub flags: [u8; 4],
     /// The u16 words at +0x12, +0x14, +0x16 and +0x18's low word, kept as stored.
     pub words: [u16; 4],
+    /// The group's parameters, in stored order.
     pub params: Vec<Param>,
+    /// One entry per parameter (`entries[i]` belongs to `params[i]`).
     pub entries: Vec<Entry>,
 }
 
+/// A binding set or pass binding as the resource stores it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Set {
     /// The resource's own id, as the blob states it.
@@ -74,7 +87,9 @@ pub struct Set {
     pub head: [u32; 2],
     /// Whether it is a pass binding, and the version word it states (1 or 0x101); a set has none (0).
     pub pass: bool,
+    /// Whether this is a pass binding ([`PASS_BINDING`]) rather than a binding set ([`BINDING_SET`]).
     pub version: u32,
+    /// The version word a pass binding states (1 or 0x101); 0 for a set.
     pub groups: Vec<Group>,
     /// The bytes between the last entry table and the relocation list.
     pub trailer: Vec<u8>,
@@ -265,7 +280,7 @@ pub fn read(rtype: u32, d: &[u8], meta: &[u8; 16]) -> Result<Set> {
 ///                    t64 and up -> the pass binding, group 1, the entry whose index is the register - 64
 /// ```
 ///
-/// Evidence (primase's [`tests/binding.rs`](https://github.com/Kalmarv/primase/tree/main/worlds/frostbite/tests/binding.rs), the 2,931 raster permutations of the game configuration bundle and the programs
+/// Evidence (a census over the 2,931 raster permutations of the game configuration bundle and the programs
 /// they run, counting each declared register in space 0): the constant buffers at b4 have the size the pass binding's
 /// group 0 lays out in 5,707 of 5,707; at b1 the size set 0's group 0 lays out in 2,867 of 2,887; at b0 the size set
 /// 1's group 0 lays out in 4,069 of 4,613 (the other 544 are not told apart: b0 may have another source there); the
@@ -273,7 +288,9 @@ pub fn read(rtype: u32, d: &[u8], meta: &[u8; 16]) -> Result<Set> {
 /// b3 (38) and samplers (4,277) have no source in these sets.
 #[derive(Clone, Copy, Debug)]
 pub struct Bindings<'a> {
+    /// The pass binding, if the permutation has one; it supplies the constant buffer at b4 and the resources from t64.
     pub pass: Option<&'a Set>,
+    /// The binding sets 0 to 2, in the order the permutation's shared data names them; `None` where it names none.
     pub sets: [Option<&'a Set>; 3],
 }
 
@@ -332,9 +349,14 @@ impl<'a> Bindings<'a> {
 /// the group, the parameter's record and its entry (a constant buffer's byte offset, a resource group's index).
 #[derive(Clone, Copy, Debug)]
 pub struct Slot<'a> {
+    /// Index of the set (0 to 2) in [`Bindings::sets`].
     pub set: usize,
+    /// Index of the group in the set.
     pub group: usize,
+    /// Index of the parameter in the group (its `params[i]` and `entries[i]`).
     pub index: usize,
+    /// The parameter's record.
     pub param: &'a Param,
+    /// The parameter's entry: a constant buffer's byte offset, or a resource group's index.
     pub entry: &'a Entry,
 }

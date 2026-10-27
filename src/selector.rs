@@ -18,7 +18,7 @@
 //! The permutation indices of the leaves are every index below the permutation count, each once. A record with no
 //! options, nodes or entries has one permutation, which every walk ends at.
 //!
-//! Measured on the game's data (one read-only dump of 130 sampled records that have a tree, [`selector_dump.rs`](https://github.com/Kalmarv/primase/tree/main/worlds/frostbite/tests/selector_dump.rs)):
+//! Measured on the game's data (a read-only dump of 130 sampled records that have a tree; `tests/selector_census.rs` reads every record of the two databases):
 //! all of those tile, are such trees, and test one option per level; the 6 that mix child and leaf entries are the
 //! ones whose leaves lie above the last option. Every other record is unmeasured until a census reads them all.
 //! The options are the engine's: 43 of 1,345 option names appear in a material's depot block, so the values a walk
@@ -63,9 +63,11 @@ const LEAF: u16 = 0x8000;
 pub struct SelectorOption {
     /// The hash of the option's name (the name is not known).
     pub name: u64,
+    /// The option's type word (u32 at +8 of its 16-byte record), kept as stored.
     pub kind: u32,
     /// The record's count word of this option (1 in the sample; its meaning is not known).
     pub count: u16,
+    /// The u16 at +14 of the option record, kept as stored; its meaning is not known.
     pub extra: u16,
 }
 
@@ -83,13 +85,16 @@ pub enum Target {
 pub struct Edge {
     /// The hash of the option value.
     pub value: u64,
+    /// Where the entry leads: another node, or the end of the walk at a permutation.
     pub to: Target,
 }
 
 /// A node: the option it tests (an index in [`Selector::options`]) and its entries.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Node {
+    /// The option the node tests: an index into [`Selector::options`].
     pub option: usize,
+    /// One edge per value of that option the node names, in stored order.
     pub edges: Vec<Edge>,
 }
 
@@ -97,7 +102,9 @@ pub struct Node {
 /// permutation it ends at. An option not on the way may take any value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Leaf {
+    /// The option values on the way to the leaf, as `(option index, value hash)` in the order tested.
     pub path: Vec<(usize, u64)>,
+    /// The permutation the leaf ends at: an index into the record's permutation ids.
     pub permutation: usize,
 }
 
@@ -106,19 +113,35 @@ pub struct Leaf {
 pub enum WalkError {
     /// A value is needed for each option of the record, in the record's order.
     #[error("{given} option values for {options} options")]
-    Count { given: usize, options: usize },
+    Count {
+        /// Number of values given.
+        given: usize,
+        /// Number of options the record has.
+        options: usize,
+    },
     /// The node tests the option, and the value is not one of its entries.
     #[error("option {option} has no entry for the value {value:#018x} at node {node}")]
-    NoEdge { node: usize, option: usize, value: u64 },
+    NoEdge {
+        /// Index of the node the walk reached.
+        node: usize,
+        /// The option that node tests.
+        option: usize,
+        /// The value hash that was given for that option.
+        value: u64,
+    },
     /// The tree is not one [`Selector::read`] returns: a node that does not exist, an option past the values, or a
     /// cycle.
     #[error("the tree is malformed at node {node}")]
-    Malformed { node: usize },
+    Malformed {
+        /// Index of the node where the walk found the tree broken.
+        node: usize,
+    },
 }
 
 /// A program record's selector, read and checked ([`Selector::read`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Selector {
+    /// The record's options, in stored order. A walk takes one value per option, in this order.
     pub options: Vec<SelectorOption>,
     /// The tree: node 0 is the root. Empty when the record has no options (then one permutation).
     pub nodes: Vec<Node>,

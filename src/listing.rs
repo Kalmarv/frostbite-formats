@@ -16,7 +16,9 @@ pub struct Listed {
     /// The superbundle TOC, relative to the data folder (as in [`Folder::tocs`](super::folder::Folder::tocs)), and the
     /// bundle in it.
     pub toc: String,
+    /// The bundle the entry is in, by name.
     pub bundle: String,
+    /// Which table of the manifest the entry came from.
     pub kind: Kind,
     /// The entry's place among the manifest's entries of its kind.
     pub index: usize,
@@ -24,6 +26,7 @@ pub struct Listed {
     pub name: String,
     /// A resource's type id and its id.
     pub resource_type: Option<u32>,
+    /// A resource's own 64-bit id; `None` for EBX documents and chunks.
     pub resource_id: Option<u64>,
     /// The entry's size once decoded.
     pub size: u32,
@@ -34,12 +37,15 @@ pub struct Listed {
 /// A bundle opened: its TOC's tables, its file table and its manifest.
 #[derive(Clone, Debug)]
 pub struct Bundle {
+    /// Path of the superbundle TOC the bundle was found in, relative to the data folder.
     pub toc_path: String,
+    /// The bundle's name as the TOC states it.
     pub name: String,
     pub(super) toc: Arc<Toc>,
     pub(super) files: Vec<FileRef>,
     /// The index in `files` of the manifest's first asset.
     pub(super) first: usize,
+    /// The bundle's binary manifest, with the sizes, hashes and names of its assets.
     pub manifest: Manifest,
 }
 
@@ -47,7 +53,9 @@ pub struct Bundle {
 /// read, by name with the reason.
 #[derive(Clone, Debug, Default)]
 pub struct Listing {
+    /// The bundles of the TOC whose region and manifest were read, in TOC order.
     pub bundles: Vec<Bundle>,
+    /// `(bundle name, reason)` for each bundle that could not be listed: its manifest file was missing from the region, or would not read.
     pub unread: Vec<(String, String)>,
 }
 

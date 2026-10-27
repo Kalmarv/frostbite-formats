@@ -13,17 +13,22 @@ pub const RTYPE: u32 = 0x7331_2045;
 /// A parameter block: its hash and its bytes (read its parameters with [`params`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Block {
+    /// The block's 64-bit hash, stored in its descriptor.
     pub hash: u64,
+    /// The block's bytes: a parameter count, then the parameter records (see [`params`]).
     pub data: Vec<u8>,
 }
 
 /// A depot: the material key to block map, with the blocks it names.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Depot {
+    /// The 64-bit header word at the start of the payload, kept as stored.
     pub head: u64,
+    /// The `version` word of the resource metadata (bytes 8..12).
     pub version: u32,
     /// (material key, block index), in stored order.
     pub entries: Vec<(u64, usize)>,
+    /// The parameter blocks, each once, in the order their first entry uses them. Entries that share a descriptor in the file share a block.
     pub blocks: Vec<Block>,
 }
 
@@ -174,12 +179,17 @@ fn elem_size(ty: u32) -> Option<usize> {
 /// One parameter of a block: name hash (its top 16 bits name the texture slot), type, and where its value bytes are.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Param {
+    /// The 64-bit hash of the parameter's name; for a texture reference its top 16 bits are the slot (see [`Param::slot`]).
     pub name: u64,
+    /// The value type id: [`TEXTURE`] or one of the numeric types whose element size the reader knows. An unknown type is an error.
     pub ty: u32,
+    /// The 16-bit field stored at offset 12 of the record, kept as stored; its meaning is not known.
     pub count: u16,
+    /// The 16-bit field stored at offset 14 of the record, kept as stored; its meaning is not known.
     pub extra: u16,
     /// Offset of the parameter record in the block, and its length.
     pub at: usize,
+    /// Length in bytes of the record: 49 for a texture reference, otherwise 20 plus the element count times the type's element size.
     pub len: usize,
 }
 

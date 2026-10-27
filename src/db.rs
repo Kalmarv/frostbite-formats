@@ -11,11 +11,17 @@ const W: &str = "native db";
 /// (strings, blobs and fixed-size values) or neither.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct Node {
+    /// The type tag: the low 5 bits of the stored tag byte (1 list, 2 object, 7 string, 19 blob, 8 and 11 four-byte values, and so on). 0 marks the end of a container.
     pub ty: u8,
+    /// Whether the node has a name: bit 7 of the tag byte is clear.
     pub named: bool,
+    /// Whether a container's children ended with an explicit zero tag, so that writing it back reproduces the bytes.
     pub terminated: bool,
+    /// The node's name as Latin-1 text; empty when the node is unnamed.
     pub name: String,
+    /// The stored bytes of a string, blob or fixed-size value (a string keeps its zero terminator); empty for containers.
     pub payload: Vec<u8>,
+    /// The nodes of a list or object, in stored order; empty for other types.
     pub children: Vec<Node>,
 }
 

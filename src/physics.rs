@@ -56,12 +56,15 @@ pub const MAX_U16: usize = 0xFFFF;
 /// A PhysicsResource: its header words, the body block, its shapes and its parts.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PhysicsResource {
+    /// The version word at 0x00 (2 in every file seen).
     pub version: u32,
     /// The word at 0x08: 1 in Studio's files, 0 in the game's own; meaning unknown.
     pub word08: u32,
     /// The block at 0x38: 0x4C bytes in some (ReSkate Studio writes its template's), empty in others.
     pub body: Vec<u8>,
+    /// The shapes, in stored order; a part names one by index.
     pub shapes: Vec<Shape>,
+    /// The parts, in stored order.
     pub parts: Vec<Part>,
 }
 
@@ -73,18 +76,27 @@ pub const PART_FLAGS: u32 = 0x800;
 /// One part: a shape placed with its rotation and position, with its kind, ids and packed physics material.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Part {
+    /// Rotation quaternion `x, y, z, w` (f32x4 at 0x00).
     pub rotation: [f32; 4],
+    /// Position of the shape in the resource's space (f32x3 at 0x10).
     pub position: [f32; 3],
     /// The f32 after the position (1.0 in every file seen).
     pub w: f32,
+    /// The u32 at 0x20, kept as stored.
     pub word20: u32,
+    /// The shape kind (u32 at 0x24): [`KIND_MESH`], [`KIND_CONVEX`] or [`KIND_BOX`].
     pub kind: u32,
+    /// Three u32 ids (at 0x28, 0x2c and 0x30), kept as stored; their meaning is not established here.
     pub ids: [u32; 3],
+    /// The u32 at 0x34, kept as stored.
     pub word34: u32,
+    /// Index into [`PhysicsResource::shapes`] (u32 at 0x38); [`NO_SHAPE`] when the part names none.
     pub shape: u32,
+    /// The u32 at 0x3c, kept as stored.
     pub word3c: u32,
     /// The packed physics material: `(material slot << 6) | flags` (ReSkate's `material_grid.h`).
     pub material: u32,
+    /// The part flags (u32 at 0x44); [`PART_FLAGS`] in every file seen.
     pub flags: u32,
 }
 
@@ -112,7 +124,9 @@ impl Part {
 pub struct Edge {
     /// The cosine of half the angle between the two faces' normals on a convex edge, 1.0 otherwise.
     pub value: f32,
+    /// Whether the edge is concave: the other face's centroid is on or above this face's plane, and the faces are not flat.
     pub concave: bool,
+    /// Whether the two faces across the edge are flat: the angle between their normals is at most 0.1 degrees.
     pub flat: bool,
 }
 
@@ -129,11 +143,15 @@ impl Edge {
 /// corner index is derived from the faces (read checks it, write builds it).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Shape {
+    /// Minimum corner of the shape's bounds (f32x3 at 0x00 of the shape record); zero for the game's convex shapes.
     pub min: [f32; 3],
+    /// Maximum corner of the shape's bounds (f32x3 at 0x0c).
     pub max: [f32; 3],
+    /// The vertex positions (f32x3 each).
     pub vertices: Vec<[f32; 3]>,
     /// Face `f`'s corners are `corners[faces[f] as usize..faces[f + 1] as usize]`; `faces` starts at 0.
     pub faces: Vec<u16>,
+    /// For every face corner, the index of its vertex (u16 each).
     pub corners: Vec<u16>,
     /// One per corner, or none (a convex shape).
     pub edges: Vec<Edge>,
@@ -146,7 +164,9 @@ pub struct Shape {
 /// A face's plane as stored: its normal octahedrally encoded (two snorm16 values) and its offset.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Plane {
+    /// The face normal octahedrally encoded as two snorm16 values.
     pub normal: [i16; 2],
+    /// The plane offset (f32).
     pub offset: f32,
 }
 
@@ -643,11 +663,15 @@ pub fn write(p: &PhysicsResource) -> Result<Vec<u8>> {
 /// from.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Welded {
+    /// The welded vertex positions, in order of first use.
     pub positions: Vec<[f32; 3]>,
+    /// The kept triangles as indices into [`Welded::positions`].
     pub triangles: Vec<[u32; 3]>,
+    /// `source[t]` is the index of the input triangle that kept triangle `t` came from.
     pub source: Vec<usize>,
     /// Input triangles dropped: degenerate (two corners welded together, or no area) and repeated.
     pub degenerate: usize,
+    /// Input triangles dropped because an earlier triangle has the same corners in the same order.
     pub repeated: usize,
 }
 

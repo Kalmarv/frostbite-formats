@@ -1,7 +1,7 @@
 //! A rigid MeshSet and its geometry chunk built from triangle meshes ([`build`]): one LOD, one section a part, laid out
 //! as the game's own one-LOD Quick Drop meshes are (the 73 of `Win32/buildkititems.toc`, each one `default_mat`
-//! section; 60 store these three streams, 13 add a sub-material index, usage 51). [`tests/rigid.rs`](https://github.com/Kalmarv/primase/tree/main/worlds/frostbite/tests/rigid.rs) rebuilds each of
-//! the 60 from its decoded geometry: the chunk comes out byte-identical but for tangent frames with two encodings
+//! section; 60 store these three streams, 13 add a sub-material index, usage 51). Rebuilding each of
+//! the 60 from its decoded geometry (a check run on the game's files, not part of this repository's tests) gives: the chunk comes out byte-identical but for tangent frames with two encodings
 //! (the same frame either way), and every record field but the measured ones below byte-identical.
 //!
 //! A section's vertices are three streams: half-float positions (w 1), half-float UV0 and the packed tangent frame
@@ -39,13 +39,18 @@ const STRIDES: [u8; 3] = [8, 4, 4];
 pub struct Part {
     /// The material's name (section +0x08), its key (+0x138) and its index in the mesh asset's `Materials` (+0x1c).
     pub material: String,
+    /// The material's key (section +0x138).
     pub key: u64,
+    /// The material's index in the mesh asset's `Materials` list (section +0x1c).
     pub slot: u8,
+    /// Vertex positions in metres; stored as half floats, so they are rounded on writing.
     pub positions: Vec<[f32; 3]>,
     /// Per vertex: the unit normal; the tangent and, in w, the bitangent's sign (the bitangent, `w * (normal x
     /// tangent)`, points where V grows, as in the game's meshes).
     pub normals: Vec<[f32; 3]>,
+    /// Per vertex: the unit tangent in x, y, z and the bitangent's sign (+1 or -1) in w.
     pub tangents: Vec<[f32; 4]>,
+    /// Per vertex: the UV0 coordinate; stored as half floats.
     pub uv: Vec<[f32; 2]>,
     /// Indices into this part's vertices.
     pub triangles: Vec<[u32; 3]>,
@@ -54,7 +59,9 @@ pub struct Part {
 /// A built mesh: the MeshSet (write it with [`meshset::write`]) and its LOD's geometry chunk.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Built {
+    /// The MeshSet to write with [`meshset::write`]: one LOD with one section per part.
     pub meshset: MeshSet,
+    /// The LOD's geometry chunk: the vertex streams, then the indices, padded to 16 bytes.
     pub chunk: Vec<u8>,
 }
 
@@ -145,7 +152,9 @@ fn area(p: [[f64; 3]; 3]) -> f64 {
 /// What [`build`] measures of a part (the module documentation's measures).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Measures {
+    /// Minimum corner of the part's positions, per axis.
     pub min: [f32; 3],
+    /// Maximum corner of the part's positions, per axis.
     pub max: [f32; 3],
     /// Surface area, square metres.
     pub area: f32,

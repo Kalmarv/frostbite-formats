@@ -348,9 +348,13 @@ impl Source<'_> {
 /// bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Resource {
+    /// The resource's name as its manifest states it.
     pub name: String,
+    /// The resource type id from the manifest.
     pub rtype: u32,
+    /// The 16 metadata bytes from the manifest, kept as stored.
     pub meta: [u8; 16],
+    /// The decoded payload.
     pub bytes: Vec<u8>,
 }
 
@@ -359,6 +363,7 @@ pub struct Resource {
 pub struct EbxEntry {
     /// Its name in the bundle's manifest.
     pub name: String,
+    /// Archive, offset and stored size of the document's bytes (see [`FileRef`]).
     pub file: FileRef,
     /// Its payload's size.
     pub size: usize,

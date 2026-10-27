@@ -14,7 +14,11 @@ pub const BUNDLE_MAGIC: u32 = 0xED1C_EDB8;
 /// One file of a bundle: archive, offset, stored size.
 pub type FileRef = (Loc, u32, u32);
 
-/// The region's file table and its optional inline manifest.
+/// The region's file table (archive, offset and stored size of each file, the manifest first when it is not inline) and
+/// its inline manifest bytes (empty when the region has none).
+///
+/// Refused: a header whose counts are negative or disagree, a table or inline manifest outside the bytes, and a first
+/// file with no archive identifier.
 pub fn read_region(r: &[u8]) -> Result<(Vec<FileRef>, Vec<u8>)> {
     let rd = Rd::new(r, R);
     let int = |i: usize| rd.i32be(crate::at(0, i, 4));
@@ -132,8 +136,11 @@ pub fn write_region(files: &[FileRef], inline: &[u8]) -> Result<Vec<u8>> {
 /// What a manifest row names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
+    /// An EBX document.
     Ebx,
+    /// A resource (a MeshSet, a texture header, a shader resource...), identified by a type id and a 64-bit resource id.
     Res,
+    /// A chunk, identified by a GUID (texture pixels, geometry, ...).
     Chunk,
 }
 
@@ -141,15 +148,25 @@ pub enum Kind {
 /// chunks a GUID and a logical offset / size.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Asset {
+    /// Which table the row came from.
     pub kind: Kind,
+    /// Asset path (EBX and resources); empty for chunks, which have a GUID instead.
     pub name: String,
+    /// SHA-1 of the stored bytes, from the manifest's hash table (one per asset, EBX then resources then chunks).
     pub sha1: [u8; 20],
+    /// Uncompressed size in bytes. For a chunk it is `(loff & 0xFFFF) | lsize`, as the manifest has no separate field for it.
     pub size: u32,
+    /// Resource type id (resources only; 0 otherwise).
     pub rtype: u32,
+    /// The 16 metadata bytes stored with a resource (resources only), kept as stored.
     pub rmeta: [u8; 16],
+    /// 64-bit resource id (resources only).
     pub rid: u64,
+    /// Chunk GUID (chunks only), with the byte order of the TOC's chunk table.
     pub guid: [u8; 16],
+    /// Chunk logical offset (chunks only): the 32-bit value stored in the chunk record.
     pub loff: u32,
+    /// Chunk logical size (chunks only): the 32-bit value stored in the chunk record.
     pub lsize: u32,
 }
 
@@ -173,11 +190,15 @@ impl Asset {
 /// A bundle's binary manifest: its EBX documents, resources and chunks, and the chunk metadata DB.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Manifest {
+    /// The bundle's EBX documents, in manifest order.
     pub ebx: Vec<Asset>,
+    /// The bundle's resources, in manifest order.
     pub res: Vec<Asset>,
+    /// The bundle's chunks, in manifest order.
     pub chunks: Vec<Asset>,
     /// The chunk metadata DB, as stored.
     pub meta: Vec<u8>,
+    /// Whether the manifest was stored big-endian (its magic word read that way). [`write_manifest`] writes only little-endian.
     pub big_endian: bool,
 }
 
@@ -312,7 +333,9 @@ pub fn read_manifest(m: &[u8]) -> Result<Manifest> {
     Ok(b)
 }
 
-/// Little endian, as Studio and ReSkate write.
+/// The manifest as little-endian bytes, the form Studio and ReSkate write; [`read_manifest`] reads it back.
+///
+/// An error when `b.big_endian` is set, a name is not Latin-1, or a count or offset exceeds 32 bits.
 pub fn write_manifest(b: &Manifest) -> Result<Vec<u8>> {
     if b.big_endian {
         return Err(bad(M, 0, "only little-endian manifests are written"));

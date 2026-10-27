@@ -14,7 +14,9 @@ pub const TEXTURE_LOOKUP: u32 = 0x2D25_4A89;
 /// A program lookup resource: everything before the rows (the program records), and the rows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProgramLookup {
+    /// Everything in the payload before the rows: the program records ([`read_records`]) and the relocation data, kept as stored.
     pub head: Vec<u8>,
+    /// Material key to the program indices that material runs. Each row lists 1 to 4096 indices.
     pub rows: BTreeMap<u64, Vec<u32>>,
     /// Keys in stored order (equal to sorted order in every table seen; kept to reproduce the bytes).
     pub order: Vec<u64>,
@@ -130,8 +132,11 @@ pub const RECORD_LEN: usize = 168;
 /// array at 0x64). The rest of the record (arrays of state the permutations are drawn with) is kept as stored.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProgramRecord {
+    /// The material key (u64 at +0 of the record).
     pub key: u64,
+    /// The ids of the permutations the program runs (a `u64` array: count at +0x60, pointer to it at +0x64).
     pub permutations: Vec<u64>,
+    /// The whole 168-byte record as stored, including the parts not decoded into the fields above.
     pub raw: [u8; RECORD_LEN],
 }
 

@@ -56,27 +56,44 @@ pub const MAX_LODS: usize = (0x68 - 0x30) / 8;
 
 /// Element usages seen in skate.'s declarations (Frostbite's VertexElementUsage).
 pub mod usage {
+    /// Vertex position.
     pub const POSITION: u8 = 1;
+    /// Blend (skinning) bone indices.
     pub const BLEND_INDICES: u8 = 2;
+    /// Blend (skinning) bone weights.
     pub const BLEND_WEIGHTS: u8 = 4;
+    /// First vertex colour.
     pub const COLOR0: u8 = 30;
+    /// Second vertex colour.
     pub const COLOR1: u8 = 31;
+    /// First texture coordinate set (UV0).
     pub const TEXCOORD0: u8 = 33;
+    /// Second texture coordinate set (UV1).
     pub const TEXCOORD1: u8 = 34;
+    /// Sub-material index.
     pub const SUBMATERIAL: u8 = 51;
+    /// Packed tangent frame, four bytes a vertex (see [`crate::tangent`]).
     pub const TANGENT_SPACE: u8 = 52;
 }
 
 /// Element formats (Frostbite's VertexElementFormat, with the numbering Frosty's SDK uses) and their sizes in bytes.
 /// `tests/meshset.rs` checks every element of the base game against its stream stride with these sizes.
 pub mod format {
+    /// Two 32-bit floats, 8 bytes.
     pub const FLOAT2: u8 = 0x02;
+    /// Three 32-bit floats, 12 bytes.
     pub const FLOAT3: u8 = 0x03;
+    /// Four 32-bit floats, 16 bytes.
     pub const FLOAT4: u8 = 0x04;
+    /// Two half floats, 4 bytes.
     pub const HALF2: u8 = 0x06;
+    /// Four half floats, 8 bytes.
     pub const HALF4: u8 = 0x08;
+    /// Four unsigned bytes, 4 bytes.
     pub const UBYTE4: u8 = 0x0c;
+    /// Four normalised unsigned bytes, 4 bytes.
     pub const UBYTE4N: u8 = 0x0d;
+    /// Four unsigned 16-bit integers, 8 bytes.
     pub const USHORT4: u8 = 0x17;
     /// The size in bytes of an element of format `f`, `None` for a format not listed.
     pub fn size(f: u8) -> Option<usize> {
@@ -107,9 +124,13 @@ pub mod format {
 /// One element of a vertex declaration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Element {
+    /// The element's usage ([`usage`]).
     pub usage: u8,
+    /// The element's format ([`format`]); [`format::size`] gives its size.
     pub format: u8,
+    /// Byte offset of the element within its stream's vertex.
     pub offset: u8,
+    /// Index of the vertex stream the element is read from; 255 marks an element bound to no stream (the shader reads a default).
     pub stream: u8,
 }
 
@@ -117,8 +138,11 @@ pub struct Element {
 /// their reading).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Decl {
+    /// The declared elements, in stored order (at most 16).
     pub elements: Vec<Element>,
+    /// Bytes per vertex of each stream (at most 16 streams).
     pub strides: Vec<u8>,
+    /// The declaration exactly as stored (100 bytes: 16 element slots of 4 bytes, 16 stream strides of 2 bytes, then the element and stream counts).
     pub bytes: [u8; DECL_SIZE],
 }
 
@@ -188,16 +212,23 @@ pub struct Section {
     pub record: Vec<u8>,
     /// The material name (+0x08).
     pub name: String,
+    /// The material key (u64 at +0x138 of the section record).
     pub key: u64,
     /// The stored vertex layout (what the chunk holds).
     pub decl: Decl,
     /// The draw layout: `decl` plus any streams filled at run time.
     pub draw_decl: Decl,
+    /// The section flags (u8 at +0x1b); `0x0e` is an opaque, shadow-casting section.
     pub flags: u8,
+    /// Total vertex stride in bytes (u8 at +0x1e).
     pub stride: u8,
+    /// Number of triangles (u32 at +0x20).
     pub primitives: u32,
+    /// Index of the section's first index in the LOD's index buffer (u32 at +0x24).
     pub start_index: u32,
+    /// Byte offset of the section's vertices in the LOD's vertex buffer (u32 at +0x28).
     pub vertex_offset: u32,
+    /// Vertex count (u32 at +0x2c).
     pub vertices: u32,
     /// The bone list (the module documentation's section +0x10): empty for a section with no bones.
     pub bones: Vec<u16>,
@@ -232,14 +263,19 @@ pub struct Lod {
     pub record: Vec<u8>,
     /// The LOD's name (+0x8c), and its parts +0x94 and +0x9c.
     pub name: String,
+    /// The LOD name's two parts at +0x94 and +0x9c.
     pub name_parts: [NamePart; 2],
     /// The five lists of section indices (+0x14 + 12k).
     pub lists: [Vec<u8>; LISTS],
+    /// GUID of the LOD's geometry chunk, which holds the vertex buffer and then the index buffer (16 bytes at +0x74).
     pub chunk: [u8; 16],
     /// Bytes per index: 2 (format 0x21) or 4 (format 0x2e), from the LOD's index format at +0x54.
     pub index_size: u8,
+    /// Size in bytes of the LOD's index buffer (u32 at +0x58).
     pub index_bytes: u32,
+    /// Size in bytes of the LOD's vertex buffer (u32 at +0x5c); a multiple of 16.
     pub vertex_bytes: u32,
+    /// The LOD's sections, in stored order.
     pub sections: Vec<Section>,
     /// LOD record 0xb8: each section's bone mask (+0xb0).
     pub bone_masks: Option<Vec<[u8; MASK]>>,
@@ -255,11 +291,14 @@ pub struct MeshSet {
     pub header: Vec<u8>,
     /// The MeshSet's name (0x68), and its last part (0x70).
     pub name: String,
+    /// The MeshSet name's last part (pointer at +0x70).
     pub short_name: NamePart,
+    /// The LODs, at most [`MAX_LODS`].
     pub lods: Vec<Lod>,
     /// Header 0xe0: the bounded bones (0xc8, as many as 0xc6 counts) and the bone bounds (0xd0, as stored: f32x4
     /// minimum, f32x4 maximum; [`bounds`]): one a bounded bone, else one a bone (0xc4).
     pub bone_ids: Option<Vec<u16>>,
+    /// The bone bounds as stored, 32 bytes each ([`bounds`] decodes one); present only in headers of [`HEADER_BONES`] bytes.
     pub bone_bounds: Option<Vec<[u8; BOUNDS]>>,
     /// The data after the relocation table (the metadata's third word), which only [`read_resource`] reads.
     pub tail: Vec<u8>,
@@ -377,7 +416,9 @@ fn opt_ptr(r: &Rd, at: usize) -> Result<Option<usize>> {
 /// of its own (ReSkate Studio's meshes, the part's text again right after the name).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NamePart {
+    /// The part starts `usize` bytes into the name.
     At(usize),
+    /// The part is a string of its own, stored after the name.
     Own(String),
 }
 

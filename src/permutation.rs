@@ -25,13 +25,16 @@ pub const COMPUTE: u32 = 0x95CE_62DD;
 /// Whether a permutation draws or computes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
+    /// A rasterisation pipeline ([`RASTER`]): a vertex program, usually with a pixel program.
     Raster,
+    /// A compute pipeline ([`COMPUTE`]): one compute program.
     Compute,
 }
 
 /// A permutation: the programs (as CompiledBytecode GUIDs) one choice of options runs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Permutation {
+    /// Whether the resource is a raster or a compute permutation.
     pub kind: Kind,
     /// The resource's own id.
     pub id: u64,
@@ -143,10 +146,15 @@ pub const SHARED_COMPUTE: u32 = 0x879B_A711;
 ///
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SharedData {
+    /// The resource's own id (the last eight bytes of its metadata).
     pub id: u64,
+    /// The id of the pass binding ([`crate::binding::PASS_BINDING`]) the permutation uses (u64 at 0x00); `None` when it is 0.
     pub pass_binding: Option<u64>,
+    /// The id of the binding signature (u64 at 0x08); never 0.
     pub signature: u64,
+    /// The ids of binding sets 0, 1 and 2 (u64 at 0x18, 0x20 and 0x28); `None` where the id is 0.
     pub sets: [Option<u64>; 3],
+    /// The id of the root-slot initial data (u64 at 0x38); never 0.
     pub root_slots: u64,
     /// The words at 0x10 and 0x30.
     pub words: [u64; 2],
@@ -199,26 +207,38 @@ pub fn read_shared(rtype: u32, d: &[u8], meta: &[u8; 16]) -> Result<SharedData> 
 /// A comparison, in D3D12's order less one (`Never` is 0).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Compare {
+    /// The test never passes.
     Never,
+    /// Passes when the new value is less than the stored one.
     Less,
+    /// Passes when the values are equal.
     Equal,
+    /// Passes when the new value is less than or equal to the stored one.
     LessEqual,
+    /// Passes when the new value is greater than the stored one.
     Greater,
+    /// Passes when the values differ.
     NotEqual,
+    /// Passes when the new value is greater than or equal to the stored one.
     GreaterEqual,
+    /// The test always passes.
     Always,
 }
 
 /// A stencil operation, in D3D12's order less one (`Keep` is 0).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum StencilOp {
+    /// Keep the stored value.
     Keep,
+    /// Set the stored value to zero.
     Zero,
+    /// Replace the stored value with the reference value.
     Replace,
     /// Increment, clamped at the maximum.
     IncrementSaturate,
     /// Decrement, clamped at zero.
     DecrementSaturate,
+    /// Bitwise invert the stored value.
     Invert,
     /// Increment, wrapping to zero.
     Increment,
@@ -229,25 +249,35 @@ pub enum StencilOp {
 /// A blend operation, in D3D12's order less one (`Add` is 0).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BlendOp {
+    /// `source + destination`.
     Add,
+    /// `source - destination`.
     Subtract,
+    /// `destination - source`.
     ReverseSubtract,
+    /// The smaller of source and destination.
     Min,
+    /// The larger of source and destination.
     Max,
 }
 
 /// Which triangles are culled.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Cull {
+    /// Neither facing is culled.
     None,
+    /// Front-facing triangles are culled.
     Front,
+    /// Back-facing triangles are culled.
     Back,
 }
 
 /// How a triangle is filled.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Fill {
+    /// Filled triangles.
     Solid,
+    /// Outlines only.
     Wireframe,
 }
 
@@ -260,6 +290,7 @@ pub struct StencilFace {
     pub depth_fail: StencilOp,
     /// On both passed.
     pub pass: StencilOp,
+    /// The comparison between the reference value and the stencil buffer.
     pub compare: Compare,
 }
 
@@ -288,41 +319,68 @@ pub struct StencilFace {
 /// colour blend operation (only the alpha one); bits 5-7 of the destination byte are refused unless zero.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FixedState {
+    /// Slope-scaled depth bias (f32 at 0x78).
     pub slope_scaled_depth_bias: f32,
     /// D3D12's integer depth bias.
     pub depth_bias: i16,
+    /// Forced sample count (u8 at 0x7e); 0 for none.
     pub forced_sample_count: u8,
+    /// Triangle fill mode (bit 0 of the byte at 0x7f).
     pub fill: Fill,
+    /// Which facing is culled (bits 1-2 of the byte at 0x7f); the value 3 is refused.
     pub cull: Cull,
+    /// Whether counter-clockwise triangles are front-facing (bit 3 of the byte at 0x7f).
     pub front_counter_clockwise: bool,
+    /// Depth clip (bit 4 of the byte at 0x7f).
     pub depth_clip: bool,
+    /// Multisampling (bit 5 of the byte at 0x7f).
     pub multisample: bool,
+    /// Antialiased lines (bit 6 of the byte at 0x7f).
     pub antialiased_line: bool,
+    /// Conservative rasterisation (bit 7 of the byte at 0x7f).
     pub conservative: bool,
+    /// Depth test (bit 0 of the byte at 0x80).
     pub depth_test: bool,
+    /// Depth writes (bit 1 of the byte at 0x80).
     pub depth_write: bool,
+    /// Stencil test (bit 2 of the byte at 0x80).
     pub stencil_test: bool,
+    /// The depth comparison (bits 3-5 of the byte at 0x80).
     pub depth_compare: Compare,
+    /// Stencil read mask (u8 at 0x81).
     pub stencil_read_mask: u8,
+    /// Stencil write mask (u8 at 0x82).
     pub stencil_write_mask: u8,
+    /// The stencil operations for front-facing triangles (two bytes at 0x83).
     pub front: StencilFace,
+    /// The stencil operations for back-facing triangles (two bytes at 0x85).
     pub back: StencilFace,
+    /// Logic operation code (bits 0-3 of the byte at 0x87), kept as stored.
     pub logic_op: u8,
+    /// Whether the logic operation is enabled (bit 4 of the byte at 0x87).
     pub logic_op_enable: bool,
+    /// Alpha to coverage (bit 5 of the byte at 0x87).
     pub alpha_to_coverage: bool,
+    /// Independent blend: whether each render target has its own blend record (bit 6 of the byte at 0x87).
     pub independent_blend: bool,
+    /// The blend records of the eight render targets (5 bytes each from 0x8c).
     pub targets: [TargetRecord; 8],
 }
 
 /// One render target's blend record, as stored ([`FixedState`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TargetRecord {
+    /// Whether blending is enabled for the target (bit 0 of the first byte).
     pub blend: bool,
     /// `RenderBlendMode` codes.
     pub source: u8,
+    /// Destination colour blend factor, a `RenderBlendMode` code (at most 16).
     pub destination: u8,
+    /// Source alpha blend factor, a `RenderBlendMode` code (at most 16).
     pub source_alpha: u8,
+    /// Destination alpha blend factor, a `RenderBlendMode` code (at most 16).
     pub destination_alpha: u8,
+    /// The alpha blend operation. The record has no colour blend operation.
     pub alpha_op: BlendOp,
     /// Bit 0 red, 1 green, 2 blue, 3 alpha.
     pub write_mask: u8,

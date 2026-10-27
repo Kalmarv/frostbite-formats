@@ -37,8 +37,11 @@ const FIXED: usize = 8 + 4 + 8 + 4 + 1;
 pub enum EntryKind {
     /// An embedded file: the icon or a screenshot.
     Embedded,
+    /// An EBX document; the entry stores nothing beyond the common fields.
     Ebx,
+    /// A resource; see [`ResInfo`].
     Res,
+    /// A chunk; see [`ChunkInfo`].
     Chunk,
 }
 
@@ -59,18 +62,26 @@ impl EntryKind {
 pub struct ResInfo {
     /// The resource type hash (a MeshSet is [`crate::MESHSET`]).
     pub res_type: u32,
+    /// The resource's 64-bit id.
     pub rid: u64,
+    /// The resource's 16 metadata bytes (stored with a u32 length), kept as stored.
     pub meta: Vec<u8>,
 }
 
 /// What a chunk entry stores beyond the common fields (FrostyToolsuite's `ChunkResource`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChunkInfo {
+    /// `rangeStart` of FrostyToolsuite's `ChunkResource` (u32), kept as stored.
     pub range_start: u32,
+    /// `rangeEnd` (u32), kept as stored.
     pub range_end: u32,
+    /// `logicalOffset` (u32), kept as stored.
     pub logical_offset: u32,
+    /// `logicalSize` (u32), kept as stored.
     pub logical_size: u32,
+    /// `h32` (u32), kept as stored.
     pub h32: u32,
+    /// `firstMip` (i32), kept as stored.
     pub first_mip: i32,
     /// Bundles the chunk is added to (the entry's own `bundles` are the bundles it modifies).
     pub added_bundles: Vec<u32>,
@@ -79,9 +90,13 @@ pub struct ChunkInfo {
 /// The kind of an entry with what only that kind stores.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Body {
+    /// An embedded file (the icon or a screenshot); nothing beyond the common fields.
     Embedded,
+    /// An EBX document; nothing beyond the common fields.
     Ebx,
+    /// A resource with its type, id and metadata.
     Res(ResInfo),
+    /// A chunk with its range, logical size and added bundles.
     Chunk(ChunkInfo),
 }
 
@@ -104,19 +119,24 @@ pub struct Stored {
     pub index: usize,
     /// The payload's size once decoded.
     pub size: u64,
+    /// The u8 flags field of the payload description, kept as stored.
     pub flags: u8,
+    /// The u32 handler field of the payload description, kept as stored.
     pub handler: u32,
+    /// The user string of the payload description (a zero-terminated string), kept as stored.
     pub user: String,
 }
 
 /// One entry of a mod: an asset it adds or replaces, with its payload (if it has one) and the bundles it touches.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
+    /// The asset's name or path, as the mod stores it (a chunk entry's name is its GUID text, see [`crate::guid_text`]).
     pub name: String,
     /// `None` for an entry without a payload (index -1: the embedded files of a fresh mod).
     pub stored: Option<Stored>,
     /// Hashes of the bundles the entry modifies.
     pub bundles: Vec<u32>,
+    /// What only this kind of entry stores.
     pub body: Body,
 }
 
@@ -134,16 +154,25 @@ impl Entry {
 /// A `.fbmod` file read into its header fields, entries and CAS-framed payloads.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Fbmod {
+    /// The file's version word; 6 ([`VERSION`]) is the only one [`read`] accepts.
     pub version: u32,
+    /// The profile string, stored with a one-byte length.
     pub profile: String,
     /// The game version the mod was made for.
     pub game_version: u32,
+    /// Title string.
     pub title: String,
+    /// Author string.
     pub author: String,
+    /// Category string.
     pub category: String,
+    /// The mod's own version string, as the author typed it (not the file version).
     pub mod_version: String,
+    /// Description string.
     pub description: String,
+    /// Link string.
     pub link: String,
+    /// The mod's entries, in stored order.
     pub entries: Vec<Entry>,
     /// CAS-framed payloads, as stored.
     pub payloads: Vec<Vec<u8>>,

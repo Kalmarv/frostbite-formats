@@ -57,7 +57,7 @@
 //! # Ok(())
 //! # }
 //! ```
-#![deny(clippy::disallowed_methods, clippy::disallowed_types)]
+#![deny(missing_docs, clippy::disallowed_methods, clippy::disallowed_types)]
 // Stored bytes never panic a reader: no unchecked index, slice, arithmetic or narrowing cast in library code.
 #![cfg_attr(
     not(test),
@@ -106,14 +106,19 @@ pub enum Error {
     /// went wrong, and what was expected.
     #[error("{what} at {offset:#x}: {detail}")]
     Format {
+        /// The thing being read (`"toc"`, `"meshset"`), the first word of the message.
         what: &'static str,
+        /// Byte offset of the failure within the bytes that were being read, not within the file they came from.
         offset: usize,
+        /// What was expected or what was found instead.
         detail: String,
     },
     /// A file or folder that could not be read.
     #[error("{}: {source}", path.display())]
     Io {
+        /// The file or folder that failed.
         path: std::path::PathBuf,
+        /// The operating system's error.
         source: std::io::Error,
     },
     /// A CAS block that would not decode (or an Oodle library that was needed and not given).

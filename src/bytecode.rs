@@ -18,7 +18,9 @@ const MAGIC: &[u8; 4] = b"DXBC";
 /// A container's place in a payload: its offset and its size, as its own header states it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Span {
+    /// Byte offset of the container's `DXBC` magic within the payload.
     pub offset: usize,
+    /// The container's size in bytes, from its own header (offset 24); the container ends at `offset + size`.
     pub size: usize,
 }
 

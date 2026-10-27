@@ -17,8 +17,11 @@ const LEAF: u32 = 0x8000_0000;
 /// Where a file lives: (patch folder or base game, install chunk, archive number).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Loc {
+    /// Whether the file is in a Patch folder (the added or replaced files) rather than the base game: set when any of bits 48..56 of the stored identifier is set.
     pub patch: bool,
+    /// Install chunk number: bits 16..48 of the stored identifier.
     pub chunk: u32,
+    /// Archive number within the chunk: the low 16 bits of the stored identifier.
     pub archive: u16,
 }
 
@@ -41,6 +44,7 @@ impl Loc {
 /// A chunk row of a TOC: GUID (as stored in bundles: little endian) and its file, or removed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TocChunk {
+    /// The chunk's GUID in the byte order bundle manifests use (the TOC stores it reversed).
     pub guid: [u8; 16],
     /// `None` for a removed chunk.
     pub file: Option<(Loc, u32, u32)>,
@@ -50,11 +54,15 @@ pub struct TocChunk {
 /// perfect-hash maps over the bundle names and chunk GUIDs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Toc {
+    /// The TOC's flags word (header word 11). Bit 2 (value 4) means names are Huffman-coded, as in base-game TOCs; the rest are kept as stored.
     pub flags: u32,
     /// (name, inline bundle region bytes), in file order.
     pub bundles: Vec<(String, Vec<u8>)>,
+    /// Where each chunk lives, in the order the TOC lists them; `None` for a removed chunk (stored as `-1`).
     pub chunks: Vec<TocChunk>,
+    /// The perfect-hash table over the lowercased bundle names: one `i32` per bundle, a positive seed or `!slot` (see [`perfect_hash`]).
     pub bundle_hash: Vec<i32>,
+    /// The perfect-hash table over the chunk GUIDs, in the same form; empty when the TOC lists no chunks.
     pub chunk_hash: Vec<i32>,
 }
 

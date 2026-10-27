@@ -19,15 +19,18 @@
 //! direction U grows (median 1.000), the bitangent along V's (median 0.998). Re-encoded, the decoded frames of 60
 //! one-LOD Quick Drop meshes give back 22,085 of their 23,704 stored frames byte for byte and the rest as the same
 //! frame: an angle on the edge of a quadrant (step 255, or the next quadrant's 0) or a normal between two axes has
-//! two encodings ([`tests/rigid.rs`](https://github.com/Kalmarv/primase/tree/main/worlds/frostbite/tests/rigid.rs)).
+//! two encodings (measured on the game's files; this repository's `tests/tangent.rs` pins the codec on hand-built frames).
 
 use crate::meshset;
 
 /// A vertex's tangent frame: unit normal, unit tangent, and the bitangent's sign (+1 or -1).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Frame {
+    /// The unit normal.
     pub normal: [f32; 3],
+    /// The unit tangent, perpendicular to the normal.
     pub tangent: [f32; 3],
+    /// The bitangent's sign: `1.0`, or `-1.0` when the bitangent is `-(n x t)`.
     pub sign: f32,
 }
 

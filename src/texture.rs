@@ -30,26 +30,40 @@ pub const HEADER_LEN: usize = 180;
 /// The largest side ReSkate accepts.
 pub const MAX_SIDE: u16 = 16384;
 
+/// A texture's 180-byte header: its dimensions, format, mip chain and the chunk that holds the pixels. Offsets are in the module documentation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TextureHeader {
+    /// The 8 bytes at 0x00, kept as stored; their meaning is not known.
     pub unknown_00: [u8; 8],
     /// 0 a 2D texture.
     pub kind: u32,
     /// Frostbite format ordinal.
     pub format: u32,
+    /// The u32 at 0x10, kept as stored; its meaning is not known.
     pub unknown_10: u32,
+    /// The u16 at 0x14, kept as stored.
     pub flags: u16,
+    /// Width in texels (u16 at 0x16); 1 to [`MAX_SIDE`].
     pub width: u16,
+    /// Height in texels (u16 at 0x18); 1 to [`MAX_SIDE`].
     pub height: u16,
+    /// Depth (u16 at 0x1a): 6 for a cube, the depth of a volume, the layer count of an array.
     pub depth: u16,
+    /// Slice count (u16 at 0x1c); equal to `depth` for the cube, volume and array kinds.
     pub slices: u16,
+    /// Number of mip levels (u8 at 0x1e); 1 to 15.
     pub mip_count: u8,
+    /// Index of the first mip level (u8 at 0x1f).
     pub first_mip: u8,
+    /// The 8 bytes at 0x20, kept as stored; their meaning is not known.
     pub unknown_20: [u8; 8],
+    /// GUID of the chunk that holds the pixels (16 bytes at 0x28), in the byte order of the TOC's chunk table.
     pub chunk: [u8; 16],
     /// Bytes of each level of one slice, largest first; the levels past `mip_count` are 0 in the game's textures.
     pub mip_sizes: [u32; 15],
+    /// Size in bytes of the pixel chunk (u32 at 0x74).
     pub chunk_size: u32,
+    /// The 60 bytes at 0x78, kept as stored (a texture group name starts at 0x80 in the base game's textures).
     pub unknown_78: [u8; 60],
 }
 

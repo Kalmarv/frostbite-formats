@@ -153,7 +153,7 @@ fn a_binding_buffer_end_past_u32_is_reported_whole() {
 /// A TOC's error offsets are into the file, envelope included: the bytes after the envelope start at 0x22C.
 #[test]
 fn a_toc_error_offset_counts_the_envelope() {
-    let region = frostbite_formats::bundle::write_region(&[], &[]);
+    let region = frostbite_formats::bundle::write_region(&[], &[]).unwrap();
     let mut b = toc::write(&[("a/b".to_string(), region)], &[], 0).unwrap();
     // the bundle count is the third word after the envelope
     b[toc::ENVELOPE + 8..toc::ENVELOPE + 12].copy_from_slice(&(-1i32).to_be_bytes());
@@ -185,4 +185,33 @@ fn raw_cas_blocks_claiming_more_than_they_hold_are_refused_before_allocation() {
     let claimed = 200 * 0x00FF_FFFF;
     let e = Cas { oodle: None }.decompress(&stream, claimed).unwrap_err();
     assert!(e.to_string().contains("size"), "{e}");
+}
+
+/// A depot whose entries each have a descriptor of their own, all pointing at the same 4,000 bytes, made the reader
+/// copy the bytes once per entry (4 MB from a 44 KB payload; a larger payload squares). The blocks together may not hold
+/// more bytes than the payload.
+#[test]
+fn depot_entries_cannot_multiply_one_block() {
+    use frostbite_formats::depot;
+    let (entries, data_len) = (1000usize, 4000usize);
+    let data_at = 0x10 + 16 * entries;
+    let desc_at = (data_at + data_len).next_multiple_of(16);
+    let mut d = Vec::new();
+    d.extend(0u64.to_le_bytes());
+    d.extend(0u64.to_le_bytes());
+    for i in 0..entries {
+        d.extend((i as u64).to_le_bytes());
+        d.extend(((desc_at + 24 * i) as u64).to_le_bytes());
+    }
+    d.resize(desc_at, 0);
+    for i in 0..entries {
+        d.extend((data_at as u64).to_le_bytes());
+        d.extend((i as u64).to_le_bytes());
+        d.extend((data_len as u64).to_le_bytes());
+    }
+    let mut meta = [0u8; 16];
+    meta[0..4].copy_from_slice(&(d.len() as u32).to_le_bytes());
+    meta[12..16].copy_from_slice(&(entries as u32).to_le_bytes());
+    let e = depot::read(&d, &meta).unwrap_err().to_string();
+    assert!(e.contains("more than the payload"), "{e}");
 }

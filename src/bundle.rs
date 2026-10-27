@@ -1,13 +1,8 @@
 //! A bundle: its region in the TOC (the file table: where each of its files lives) and its binary manifest (the
 //! first file: names, SHA-1s and sizes of the bundle's EBX, resources and chunks, plus the chunk metadata DB).
-#![allow(
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-    clippy::cast_possible_truncation
-)] // lint-todo
 
 use crate::toc::Loc;
-use crate::{Rd, Result, bad, capacity, latin1};
+use crate::{Rd, Result, bad, capacity, latin1, u32_len};
 
 const R: &str = "bundle region";
 const M: &str = "bundle manifest";
@@ -22,7 +17,7 @@ pub type FileRef = (Loc, u32, u32);
 /// The region's file table and its optional inline manifest.
 pub fn read_region(r: &[u8]) -> Result<(Vec<FileRef>, Vec<u8>)> {
     let rd = Rd::new(r, R);
-    let int = |i: usize| rd.i32be(4 * i);
+    let int = |i: usize| rd.i32be(crate::at(0, i, 4));
     let (mo, ms, lo, total, dato, ro, co, total2) = (
         int(0)?,
         int(1)?,
@@ -33,41 +28,55 @@ pub fn read_region(r: &[u8]) -> Result<(Vec<FileRef>, Vec<u8>)> {
         rd.u32be(24)?,
         int(8)?,
     );
-    if mo < 0 || ms < 0 || total < 0 || total != total2 || ro != dato || co != dato {
-        return Err(bad(R, 0, "header is invalid"));
+    let (Ok(mo), Ok(ms), Ok(total)) = (usize::try_from(mo), usize::try_from(ms), usize::try_from(total))
+    else {
+        return Err(bad(
+            R,
+            0,
+            "header is invalid: expected a metadata offset, metadata size and file count of 0 or more",
+        ));
+    };
+    if total2 < 0 || usize::try_from(total2) != Ok(total) || ro != dato || co != dato {
+        return Err(bad(
+            R,
+            0,
+            "header is invalid: expected the two file counts equal and the three data offsets equal",
+        ));
     }
     let inline = if ms > 0 {
-        rd.bytes(mo as usize, ms as usize)?.to_vec()
+        rd.bytes(mo, ms)?.to_vec()
     } else {
         Vec::new()
     };
     // each file has a flag byte and an 8-byte offset and size
-    let mut files = Vec::with_capacity(capacity(R, total as usize, 9, r.len())?);
+    let mut files = Vec::with_capacity(capacity(R, total, 9, r.len())?);
     let mut pos = dato as usize;
     let mut cur: Option<Loc> = None;
-    for i in 0..total as usize {
-        let flag = rd.u8(lo as usize + i)?;
+    for i in 0..total {
+        let flag = rd.u8(crate::at(lo as usize, i, 1))?;
         if flag == 1 {
             let enc = rd.u32be(pos)?;
-            pos += 4;
+            pos = pos.saturating_add(4);
             cur = Some(Loc {
                 patch: enc & 0x00FF_0000 != 0,
                 chunk: (enc >> 8) & 0xFF,
-                archive: (enc & 0xFF) as u16,
+                archive: u16::from(enc.to_le_bytes()[0]),
             });
         } else if flag != 0 {
             cur = Some(Loc::decode(rd.u64be(pos)?));
-            pos += 8;
+            pos = pos.saturating_add(8);
         }
         let loc = cur.ok_or_else(|| bad(R, pos, "first file has no archive identifier"))?;
-        files.push((loc, rd.u32be(pos)?, rd.u32be(pos + 4)?));
-        pos += 8;
+        files.push((loc, rd.u32be(pos)?, rd.u32be(pos.saturating_add(4))?));
+        pos = pos.saturating_add(8);
     }
     Ok((files, inline))
 }
 
 /// The counterpart of [`read_region`] for the layout Studio and ReSkate write (8-byte identifiers).
-pub fn write_region(files: &[FileRef], inline: &[u8]) -> Vec<u8> {
+///
+/// An error when the file table or the inline manifest is larger than the 32-bit offsets and counts it is stored with.
+pub fn write_region(files: &[FileRef], inline: &[u8]) -> Result<Vec<u8>> {
     let mut table = Vec::new();
     let mut flags = Vec::with_capacity(files.len());
     let mut prev = None;
@@ -86,35 +95,38 @@ pub fn write_region(files: &[FileRef], inline: &[u8]) -> Vec<u8> {
         *f |= 0x04;
     }
     let data_at = 0x24u32;
-    let meta_at = if inline.is_empty() {
-        0
-    } else {
-        data_at + table.len() as u32
+    let too_large = || {
+        bad(
+            R,
+            0,
+            "the file table and inline manifest do not fit 32-bit offsets",
+        )
     };
+    let table_end = u32_len(R, table.len())?
+        .checked_add(data_at)
+        .ok_or_else(too_large)?;
+    let inline_len = u32_len(R, inline.len())?;
+    let meta_at = if inline.is_empty() { 0 } else { table_end };
     let loc_at = if inline.is_empty() {
-        data_at + table.len() as u32
+        table_end
     } else {
-        meta_at + inline.len() as u32
+        table_end.checked_add(inline_len).ok_or_else(too_large)?
     };
-    let n = files.len() as u32;
-    let mut out = Vec::with_capacity(0x24 + table.len() + inline.len() + flags.len());
-    for v in [
-        meta_at,
-        inline.len() as u32,
-        loc_at,
-        n,
-        data_at,
-        data_at,
-        data_at,
-        0,
-        n,
-    ] {
+    let n = u32_len(R, files.len())?;
+    let mut out = Vec::with_capacity(
+        table
+            .len()
+            .saturating_add(inline.len())
+            .saturating_add(flags.len())
+            .saturating_add(0x24),
+    );
+    for v in [meta_at, inline_len, loc_at, n, data_at, data_at, data_at, 0, n] {
         out.extend(v.to_be_bytes());
     }
     out.extend(table);
     out.extend(inline);
     out.extend(flags);
-    out
+    Ok(out)
 }
 
 /// What a manifest row names.
@@ -172,27 +184,34 @@ pub struct Manifest {
 impl Manifest {
     /// The number of assets (EBX documents, resources and chunks).
     pub fn count(&self) -> usize {
-        self.ebx.len() + self.res.len() + self.chunks.len()
+        self.ebx
+            .len()
+            .saturating_add(self.res.len())
+            .saturating_add(self.chunks.len())
     }
     /// Index in the region's file list (manifest first) of resource `i`.
     pub fn res_file(&self, i: usize) -> usize {
-        1 + self.ebx.len() + i
+        self.ebx.len().saturating_add(i).saturating_add(1)
     }
     /// Index in the region's file list of chunk `i`.
     pub fn chunk_file(&self, i: usize) -> usize {
-        1 + self.ebx.len() + self.res.len() + i
+        self.ebx
+            .len()
+            .saturating_add(self.res.len())
+            .saturating_add(i)
+            .saturating_add(1)
     }
 }
 
 /// Whether `m` has a manifest's header (declared size and salted magic, either endianness).
 pub fn is_manifest(m: &[u8]) -> bool {
-    if m.len() < 36 {
+    let rd = Rd::new(m, M);
+    let (Ok(declared), Ok(be), Ok(le)) = (rd.u32be(0), rd.u32be(4), rd.u32le(4)) else {
         return false;
-    }
-    let declared = u32::from_be_bytes([m[0], m[1], m[2], m[3]]) as usize;
-    let be = u32::from_be_bytes([m[4], m[5], m[6], m[7]]);
-    let le = u32::from_le_bytes([m[4], m[5], m[6], m[7]]);
-    declared + 4 == m.len() && (be ^ BUNDLE_SALT == BUNDLE_MAGIC || le ^ BUNDLE_SALT == BUNDLE_MAGIC)
+    };
+    m.len() >= 36
+        && usize::try_from(declared).ok().and_then(|d| d.checked_add(4)) == Some(m.len())
+        && (be ^ BUNDLE_SALT == BUNDLE_MAGIC || le ^ BUNDLE_SALT == BUNDLE_MAGIC)
 }
 
 /// Read a bundle manifest to its exact end. Refused: a truncated header, a declared size that is not the data's,
@@ -202,8 +221,16 @@ pub fn read_manifest(m: &[u8]) -> Result<Manifest> {
     if m.len() < 36 {
         return Err(bad(M, 0, "header is truncated"));
     }
-    if rd.u32be(0)? as usize + 4 != m.len() {
-        return Err(bad(M, 0, "declared size does not match"));
+    let declared = rd.u32be(0)?;
+    if usize::try_from(declared).ok().and_then(|d| d.checked_add(4)) != Some(m.len()) {
+        return Err(bad(
+            M,
+            0,
+            format!(
+                "declared size {declared} does not match: expected {}, the bytes after the size word",
+                m.len().saturating_sub(4)
+            ),
+        ));
     }
     let big_endian = rd.u32be(4)? ^ BUNDLE_SALT == BUNDLE_MAGIC;
     if !big_endian && rd.u32le(4)? ^ BUNDLE_SALT != BUNDLE_MAGIC {
@@ -211,21 +238,23 @@ pub fn read_manifest(m: &[u8]) -> Result<Manifest> {
     }
     let u32e = |at: usize| if big_endian { rd.u32be(at) } else { rd.u32le(at) };
     let u64e = |at: usize| if big_endian { rd.u64be(at) } else { rd.u64le(at) };
-    let (total, ne, nr, nc) = (
-        u32e(8)? as usize,
-        u32e(12)? as usize,
-        u32e(16)? as usize,
-        u32e(20)? as usize,
-    );
-    let (strings, mo, ms) = (u32e(24)? as usize + 4, u32e(28)? as usize, u32e(32)? as usize);
-    if ne + nr + nc != total {
-        return Err(bad(M, 8, "asset counts do not add up"));
+    let size = |at: usize| u32e(at).map(|v| v as usize);
+    let (total, ne, nr, nc) = (size(8)?, size(12)?, size(16)?, size(20)?);
+    let (strings, mo, ms) = (size(24)?.saturating_add(4), size(28)?, size(32)?);
+    if ne.checked_add(nr).and_then(|n| n.checked_add(nc)) != Some(total) {
+        return Err(bad(
+            M,
+            8,
+            format!(
+                "asset counts do not add up: {ne} EBX + {nr} resources + {nc} chunks, expected the total {total}"
+            ),
+        ));
     }
-    let mut pos = 36;
-    let mut hashes = Vec::with_capacity(capacity(M, total, 20, m.len() - 36)?);
+    let mut pos = 36usize;
+    let mut hashes = Vec::with_capacity(capacity(M, total, 20, m.len().saturating_sub(36))?);
     for _ in 0..total {
         hashes.push(rd.arr::<20>(pos)?);
-        pos += 20;
+        pos = pos.saturating_add(20);
     }
     let mut b = Manifest {
         ebx: Vec::new(),
@@ -237,9 +266,9 @@ pub fn read_manifest(m: &[u8]) -> Result<Manifest> {
     for (n, kind) in [(ne, Kind::Ebx), (nr, Kind::Res)] {
         for _ in 0..n {
             let mut a = Asset::new(kind);
-            a.name = rd.cstr(strings + u32e(pos)? as usize)?;
-            a.size = u32e(pos + 4)?;
-            pos += 8;
+            a.name = rd.cstr(strings.saturating_add(size(pos)?))?;
+            a.size = u32e(pos.saturating_add(4))?;
+            pos = pos.saturating_add(8);
             if kind == Kind::Ebx {
                 b.ebx.push(a)
             } else {
@@ -247,36 +276,38 @@ pub fn read_manifest(m: &[u8]) -> Result<Manifest> {
             }
         }
     }
-    for (i, a) in b.ebx.iter_mut().chain(b.res.iter_mut()).enumerate() {
-        a.sha1 = hashes[i];
+    // `hashes` holds one per asset, EBX documents then resources then chunks
+    for (a, hash) in b.ebx.iter_mut().chain(b.res.iter_mut()).zip(&hashes) {
+        a.sha1 = *hash;
     }
     for a in &mut b.res {
         a.rtype = u32e(pos)?;
-        pos += 4;
+        pos = pos.saturating_add(4);
     }
     for a in &mut b.res {
         a.rmeta = rd.arr(pos)?;
-        pos += 16;
+        pos = pos.saturating_add(16);
     }
     for a in &mut b.res {
         a.rid = u64e(pos)?;
-        pos += 8;
+        pos = pos.saturating_add(8);
     }
-    for i in 0..nc {
+    let chunk_hashes = hashes.iter().skip(ne.saturating_add(nr));
+    for hash in chunk_hashes.take(nc) {
         let mut a = Asset::new(Kind::Chunk);
         a.guid = rd.arr(pos)?;
         if big_endian {
             a.guid.reverse();
         }
-        a.loff = u32e(pos + 16)?;
-        a.lsize = u32e(pos + 20)?;
-        pos += 24;
-        a.sha1 = hashes[ne + nr + i];
+        a.loff = u32e(pos.saturating_add(16))?;
+        a.lsize = u32e(pos.saturating_add(20))?;
+        pos = pos.saturating_add(24);
+        a.sha1 = *hash;
         a.size = (a.loff & 0xFFFF) | a.lsize;
         b.chunks.push(a);
     }
     if ms > 0 {
-        b.meta = rd.bytes(4 + mo, ms)?.to_vec();
+        b.meta = rd.bytes(mo.saturating_add(4), ms)?.to_vec();
     }
     Ok(b)
 }
@@ -288,32 +319,39 @@ pub fn write_manifest(b: &Manifest) -> Result<Vec<u8>> {
     }
     let total = b.count();
     let mut strings = Vec::new();
-    let mut offsets = Vec::with_capacity(b.ebx.len() + b.res.len());
+    let mut offsets = Vec::with_capacity(b.ebx.len().saturating_add(b.res.len()));
     for a in b.ebx.iter().chain(&b.res) {
-        offsets.push(strings.len() as u32);
+        offsets.push(u32_len(M, strings.len())?);
         strings.extend(latin1(&a.name, M)?);
         strings.push(0);
     }
-    let string_at =
-        36 + 20 * total + 8 * (b.ebx.len() + b.res.len()) + 28 * b.res.len() + 24 * b.chunks.len();
-    let meta_at = string_at + strings.len();
-    let len = meta_at + b.meta.len();
+    // the tables before the strings: header, SHA-1s, (name offset, size) pairs, resource records, chunk records
+    let assets_with_names = b.ebx.len().saturating_add(b.res.len());
+    let string_at = 36usize
+        .saturating_add(crate::at(0, total, 20))
+        .saturating_add(crate::at(0, assets_with_names, 8))
+        .saturating_add(crate::at(0, b.res.len(), 28))
+        .saturating_add(crate::at(0, b.chunks.len(), 24));
+    let meta_at = string_at.saturating_add(strings.len());
+    let len = meta_at.saturating_add(b.meta.len());
+    // the stored offsets count from the byte after the size word
+    let after_size = |at: usize| u32_len(M, at.saturating_sub(4));
     let mut out = Vec::with_capacity(len);
-    out.extend(((len - 4) as u32).to_be_bytes());
+    out.extend(after_size(len)?.to_be_bytes());
     out.extend((BUNDLE_MAGIC ^ BUNDLE_SALT).to_le_bytes());
     let meta_field = if b.meta.is_empty() {
         0
     } else {
-        (meta_at - 4) as u32
+        after_size(meta_at)?
     };
     for v in [
-        total as u32,
-        b.ebx.len() as u32,
-        b.res.len() as u32,
-        b.chunks.len() as u32,
-        (string_at - 4) as u32,
+        u32_len(M, total)?,
+        u32_len(M, b.ebx.len())?,
+        u32_len(M, b.res.len())?,
+        u32_len(M, b.chunks.len())?,
+        after_size(string_at)?,
         meta_field,
-        b.meta.len() as u32,
+        u32_len(M, b.meta.len())?,
     ] {
         out.extend(v.to_le_bytes());
     }

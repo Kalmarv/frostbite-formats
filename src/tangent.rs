@@ -20,11 +20,6 @@
 //! one-LOD Quick Drop meshes give back 22,085 of their 23,704 stored frames byte for byte and the rest as the same
 //! frame: an angle on the edge of a quadrant (step 255, or the next quadrant's 0) or a normal between two axes has
 //! two encodings ([`tests/rigid.rs`](https://github.com/Kalmarv/primase/tree/main/worlds/frostbite/tests/rigid.rs)).
-#![allow(
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-    clippy::cast_possible_truncation
-)] // lint-todo
 
 use crate::meshset;
 
@@ -47,10 +42,17 @@ const STEPS: u32 = 255;
 
 const _: () = assert!(meshset::usage::TANGENT_SPACE == 52);
 
+// Every index below is 0, 1 or 2: a literal, a value of AXES or REFERENCE, or an axis chosen among three. A stored
+// byte reaches the tables only as `code`, which `decode` bounds to 0..=5, so no stored value can index out of range.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "indices are literals or entries of the const tables, below 3"
+)]
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
+#[allow(clippy::indexing_slicing, reason = "indices are literals below 3")]
 fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [
         a[1] * b[2] - a[2] * b[1],
@@ -65,6 +67,10 @@ fn unit(a: [f64; 3]) -> Option<[f64; 3]> {
 }
 
 /// The normal that `code` and the two 9-bit values name.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "`code` is at most 5 (decode clamps it, encode builds it) and the axes are below 3"
+)]
 fn normal(code: usize, qi: u32, qj: u32) -> [f64; 3] {
     let (i, j) = AXES[code];
     let mut n = [0.0; 3];
@@ -76,6 +82,10 @@ fn normal(code: usize, qi: u32, qj: u32) -> [f64; 3] {
 }
 
 /// The tangent at angle 0 for normal `n` of `code`: the code's reference axis made perpendicular to `n`.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "`code` is at most 5 and the axes are below 3"
+)]
 fn base(code: usize, n: [f64; 3]) -> [f64; 3] {
     let (axis, dir) = REFERENCE[code];
     let mut r = [0.0; 3];
@@ -86,26 +96,38 @@ fn base(code: usize, n: [f64; 3]) -> [f64; 3] {
 }
 
 /// The frame stored in `b`.
+#[allow(clippy::indexing_slicing, reason = "the axes of a [f64; 3] are 0..3")]
+#[allow(clippy::cast_possible_truncation, reason = "f64 to the stored f32 precision")]
 pub fn decode(b: [u8; 4]) -> Frame {
-    let code = usize::from(b[3] & 7).min(5);
-    let qi = u32::from(b[3] >> 4 & 1) << 8 | u32::from(b[0]);
-    let qj = u32::from(b[3] >> 5 & 1) << 8 | u32::from(b[1]);
+    let [b0, b1, b2, b3] = b;
+    let code = usize::from(b3 & 7).min(5);
+    let qi = u32::from(b3 >> 4 & 1) << 8 | u32::from(b0);
+    let qj = u32::from(b3 >> 5 & 1) << 8 | u32::from(b1);
     let n = normal(code, qi, qj);
     let t0 = base(code, n);
-    let degrees = f64::from(b[2]) * 90.0 / f64::from(STEPS) + f64::from(b[3] >> 6) * 90.0;
+    let degrees = f64::from(b2) * 90.0 / f64::from(STEPS) + f64::from(b3 >> 6) * 90.0;
     let (s, c) = degrees.to_radians().sin_cos();
     let nt = cross(n, t0);
     let t = [0, 1, 2].map(|k| nt[k] * s + t0[k] * c);
     Frame {
         normal: n.map(|v| v as f32),
         tangent: t.map(|v| v as f32),
-        sign: if b[3] & 8 != 0 { -1.0 } else { 1.0 },
+        sign: if b3 & 8 != 0 { -1.0 } else { 1.0 },
     }
 }
 
 /// The bytes of a frame: `normal` (made unit; refused when it has no length), `tangent` (its part perpendicular to the
 /// normal; when that has no length, the angle is 0) and the bitangent's sign (negative: -1, else +1). The normal's
 /// code is its largest axis (the first of equals), the tangent's angle the nearest step.
+#[allow(clippy::indexing_slicing, reason = "axes are 0..3 and `code` is at most 5")]
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "quantisation: values are rounded and clamped into range first"
+)]
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "`2 * axis` with axis below 3 and the angle steps below 4 * 255"
+)]
 pub fn encode(normal_: [f32; 3], tangent: [f32; 3], sign: f32) -> Option<[u8; 4]> {
     let n = unit(normal_.map(f64::from))?;
     let axis = (0..3).fold(0, |best, k| if n[k].abs() > n[best].abs() { k } else { best });

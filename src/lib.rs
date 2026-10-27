@@ -39,7 +39,7 @@
 //! # fn main() -> Result<(), frostbite_formats::Error> {
 //! let archive = Loc { patch: true, chunk: 0, archive: 1 };
 //! // a bundle whose region lists one file: 16 bytes at offset 0 of the archive
-//! let region = bundle::write_region(&[(archive, 0, 16)], &[]);
+//! let region = bundle::write_region(&[(archive, 0, 16)], &[])?;
 //! let chunk = TocChunk { guid: [7; 16], file: Some((archive, 16, 64)) };
 //!
 //! let bytes = toc::write(&[("win32/levels/demo".to_string(), region)], &[chunk], 0)?;

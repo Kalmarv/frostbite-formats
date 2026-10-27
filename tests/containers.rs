@@ -41,7 +41,8 @@ fn synthetic_toc_round_trip() -> R {
                         (loc(3, 1), 0, 9),
                     ],
                     &[],
-                ),
+                )
+                .unwrap(),
             )
         })
         .collect();
@@ -66,7 +67,7 @@ fn synthetic_toc_round_trip() -> R {
     assert_eq!(toc::write(&t.bundles, &t.chunks, t.flags)?, bytes);
     for (_, region) in &t.bundles {
         let (files, inline) = bundle::read_region(region)?;
-        assert_eq!(&bundle::write_region(&files, &inline), region);
+        assert_eq!(&bundle::write_region(&files, &inline).unwrap(), region);
     }
     Ok(())
 }
@@ -140,10 +141,10 @@ fn synthetic_depot_round_trip() -> R {
             },
         ],
     };
-    let (bytes, meta) = depot::write(&dep);
+    let (bytes, meta) = depot::write(&dep).unwrap();
     let back = depot::read(&bytes, &meta)?;
     assert_eq!(back, dep);
-    assert_eq!(depot::write(&back), (bytes, meta));
+    assert_eq!(depot::write(&back).unwrap(), (bytes, meta));
     assert_eq!(depot::params(&dep.blocks[0].data)?.len(), 2);
     Ok(())
 }

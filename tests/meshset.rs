@@ -162,3 +162,58 @@ fn edits_are_written_and_bad_tables_refused() -> R {
     assert!(meshset::write(&masked).is_err());
     Ok(())
 }
+
+/// A one-section mesh from the rigid builder, written: its bytes and resource metadata.
+fn built() -> (Vec<u8>, [u8; 16]) {
+    let part = frostbite_formats::rigid::Part {
+        material: "default_mat".into(),
+        positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        normals: vec![[0.0, 0.0, 1.0]; 3],
+        tangents: vec![[1.0, 0.0, 0.0, 1.0]; 3],
+        uv: vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+        triangles: vec![[0, 1, 2]],
+        ..Default::default()
+    };
+    let m = frostbite_formats::rigid::build("world/test/a_mesh", [3; 16], &[part]).unwrap();
+    meshset::write(&m.meshset).unwrap()
+}
+
+/// Counts, pointers and sizes that run past the data are refused with an error (naming where), not a panic.
+#[test]
+fn hostile_pointers_and_counts_are_refused() {
+    let (bytes, meta) = built();
+    assert!(meshset::read_resource(&bytes, &meta).is_ok());
+    for n in 0..bytes.len() {
+        let _ = meshset::read(&bytes[..n]);
+    }
+    // the header's LOD pointer, the LOD's section count and section pointer, a list count, the name pointer
+    let lod = 0xd0;
+    for at in [
+        0x30,
+        0x68,
+        lod + 8,
+        lod + 0x0c,
+        lod + 0x14,
+        lod + 0x18,
+        lod + 0x8c,
+    ] {
+        let width = if matches!(at, 0xd8 | 0xe4) { 4 } else { 8 };
+        for v in [u64::MAX, 0xFFFF_FFFF, 0x7FFF_FFFF_FFFF] {
+            let mut c = bytes.clone();
+            c[at..at + width].copy_from_slice(&v.to_le_bytes()[..width]);
+            let e = meshset::read(&c).unwrap_err().to_string();
+            assert!(e.starts_with("meshset at "), "{at:#x}: {e}");
+        }
+    }
+    let sizes = frostbite_formats::meshset::read(&bytes).unwrap();
+    let section = &sizes.lods[0].sections[0];
+    // 3 vertices of 8 + 4 + 4 bytes in three streams
+    assert_eq!(section.stream_offset(0), Some(0));
+    assert_eq!(section.stream_offset(1), Some(24));
+    assert_eq!(section.stream_offset(3), Some(48));
+    assert_eq!(section.stream_offset(4), None);
+    let mut far = section.clone();
+    far.vertex_offset = u32::MAX;
+    far.vertices = u32::MAX;
+    assert_eq!(far.stream_offset(0), Some(u32::MAX as usize));
+}

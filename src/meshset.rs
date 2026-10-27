@@ -37,11 +37,6 @@
 //! then the header's LOD records, names, bone ids and bounds), 16-aligned; the trailing data.
 //!
 //! A section's stored streams lie one after another from its vertex offset, each `stride * vertex count` bytes.
-#![allow(
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-    clippy::cast_possible_truncation
-)] // lint-todo
 
 use crate::{Rd, Result, bad, capacity};
 
@@ -140,19 +135,33 @@ impl Default for Decl {
 impl Decl {
     /// Decode a stored declaration. Refused: more than 16 elements or streams.
     pub fn read(b: &[u8; DECL_SIZE]) -> Result<Self> {
-        let (ne, ns) = (b[96] as usize, b[97] as usize);
+        let [.., ne, ns, _, _] = *b;
+        let (ne, ns) = (usize::from(ne), usize::from(ns));
         if ne > 16 || ns > 16 {
             return Err(bad(W, 96, format!("declaration of {ne} elements, {ns} streams")));
         }
-        let elements = (0..ne)
-            .map(|e| Element {
-                usage: b[4 * e],
-                format: b[4 * e + 1],
-                offset: b[4 * e + 2],
-                stream: b[4 * e + 3],
+        let elements = b
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .take(ne)
+            .map(|&[usage, format, offset, stream]| Element {
+                usage,
+                format,
+                offset,
+                stream,
             })
             .collect();
-        let strides = (0..ns).map(|j| b[64 + 2 * j]).collect();
+        // the stream strides lie from byte 64, two bytes each, the stride in the first
+        let strides = b
+            .get(64..96)
+            .unwrap_or_default()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .take(ns)
+            .map(|&[stride, _]| stride)
+            .collect();
         Ok(Self {
             elements,
             strides,
@@ -161,7 +170,7 @@ impl Decl {
     }
     /// The sum of the stream strides: the bytes of one vertex.
     pub fn stride(&self) -> usize {
-        self.strides.iter().map(|&s| s as usize).sum()
+        self.strides.iter().map(|&s| usize::from(s)).sum()
     }
     /// The first element of `usage`.
     pub fn element(&self, usage: u8) -> Option<Element> {
@@ -195,17 +204,21 @@ pub struct Section {
 }
 
 impl Section {
-    /// Where stream `j` starts in the chunk.
-    pub fn stream_offset(&self, j: usize) -> usize {
-        self.vertex_offset as usize
-            + self.decl.strides[..j]
-                .iter()
-                .map(|&s| s as usize * self.vertices as usize)
-                .sum::<usize>()
+    /// Where stream `j` starts in the chunk; `None` when the section has no stream `j` (`j` may be the stream count,
+    /// the end of the last) or the offset does not fit the address space.
+    pub fn stream_offset(&self, j: usize) -> Option<usize> {
+        let vertices = usize::try_from(self.vertices).ok()?;
+        self.decl
+            .strides
+            .get(..j)?
+            .iter()
+            .try_fold(usize::try_from(self.vertex_offset).ok()?, |at, &s| {
+                at.checked_add(usize::from(s).checked_mul(vertices)?)
+            })
     }
-    /// One past the section's last vertex byte.
+    /// One past the section's last vertex byte (saturating: an end past the address space is past any buffer).
     fn vertex_end(&self) -> usize {
-        self.vertex_offset as usize + self.decl.stride() * self.vertices as usize
+        wide(self.vertex_offset).saturating_add(self.decl.stride().saturating_mul(wide(self.vertices)))
     }
 }
 
@@ -255,7 +268,7 @@ pub struct MeshSet {
 impl MeshSet {
     /// The header's LOD record size (0x04).
     pub fn lod_size(&self) -> usize {
-        word(&self.header, 4) as usize
+        wide(word(&self.header, 4))
     }
 }
 
@@ -278,14 +291,32 @@ pub const BOUNDS: usize = 32;
 
 /// A stored bone bound as its minimum and maximum.
 pub fn bounds(b: &[u8; BOUNDS]) -> [[f32; 4]; 2] {
-    let f = |i: usize| f32::from_le_bytes([b[4 * i], b[4 * i + 1], b[4 * i + 2], b[4 * i + 3]]);
-    [[f(0), f(1), f(2), f(3)], [f(4), f(5), f(6), f(7)]]
+    let quad = |half: &[u8]| {
+        let mut q = [0f32; 4];
+        for (v, c) in q.iter_mut().zip(half.as_chunks::<4>().0) {
+            *v = f32::from_le_bytes(*c);
+        }
+        q
+    };
+    let (min, max) = b.split_at(BOUNDS / 2);
+    [quad(min), quad(max)]
 }
 
+/// A stored 32-bit size, count or offset as a `usize` (the address space holds it).
+fn wide(v: u32) -> usize {
+    usize::try_from(v).unwrap_or(usize::MAX)
+}
+
+/// `at` moved on by `by`; past the address space it saturates, and the read or write that uses it is refused.
+fn plus(at: usize, by: usize) -> usize {
+    at.saturating_add(by)
+}
+
+/// The little-endian `u32` at `at` of a record held in memory; 0 past its end.
 fn word(b: &[u8], at: usize) -> u32 {
-    b.get(at..at + 4)
-        .and_then(|w| w.try_into().ok())
-        .map_or(0, u32::from_le_bytes)
+    b.get(at..)
+        .and_then(|b| b.first_chunk::<4>())
+        .map_or(0, |w| u32::from_le_bytes(*w))
 }
 
 /// The draw declaration against the stored one: the same streams first (equal strides), every stored element
@@ -306,9 +337,9 @@ fn check_draw(stored: &Decl, draw: &Decl) -> std::result::Result<(), String> {
         let size = format::size(e.format).ok_or_else(|| format!("unknown element format {}", e.format))?;
         let stride = *draw
             .strides
-            .get(e.stream as usize)
+            .get(usize::from(e.stream))
             .ok_or("draw element stream out of range")?;
-        if e.offset as usize + size > stride as usize {
+        if usize::from(e.offset).saturating_add(size) > usize::from(stride) {
             return Err(format!("draw element {e:?} runs past its stream"));
         }
     }
@@ -325,12 +356,12 @@ fn ptr(r: &Rd, at: usize) -> Result<usize> {
 
 /// A record's bytes with its pointer fields (u64 at `fields`) zero: where they point is the layout's, which
 /// [`write()`] lays out anew.
-fn without_pointers(b: &[u8], fields: &[usize]) -> Vec<u8> {
+fn without_pointers(b: &[u8], fields: &[usize]) -> Result<Vec<u8>> {
     let mut v = b.to_vec();
     for &f in fields {
-        v[f..f + 8].fill(0);
+        put(&mut v, f, &[0; 8])?;
     }
-    v
+    Ok(v)
 }
 
 /// A pointer field that may be null.
@@ -374,7 +405,7 @@ fn name<const N: usize>(r: &Rd, at: usize, parts: [usize; N]) -> Result<(String,
 /// `n` items of `size` bytes from `at`, read by `item`.
 fn items<T>(r: &Rd, at: usize, n: usize, size: usize, item: impl Fn(usize) -> Result<T>) -> Result<Vec<T>> {
     (0..capacity(W, n, size, r.data.len())?)
-        .map(|i| item(at + size * i))
+        .map(|i| item(crate::at(at, i, size)))
         .collect()
 }
 
@@ -383,18 +414,19 @@ fn items<T>(r: &Rd, at: usize, n: usize, size: usize, item: impl Fn(usize) -> Re
 /// (strict: a MeshSet this reader accepts can be rewritten section by section).
 pub fn read(d: &[u8]) -> Result<MeshSet> {
     let r = Rd::new(d, W);
-    let header_size = r.u32le(0)? as usize + 16;
+    let header_size = plus(r.size32le(0)?, 16);
     if header_size != HEADER && header_size != HEADER_BONES {
         return Err(bad(W, 0, format!("header of {header_size:#x} bytes")));
     }
-    let lod_size = r.u32le(4)? as usize;
+    let lod_size = r.size32le(4)?;
     if ![LOD_PLAIN, LOD_MASKS, LOD_MAP].contains(&lod_size) {
         return Err(bad(W, 4, format!("LOD records of {lod_size:#x} bytes")));
     }
-    if r.u32le(8)? as usize != SECTION_SIZE {
-        return Err(bad(W, 8, format!("section records of {:#x} bytes", r.u32le(8)?)));
+    let section_size = r.size32le(8)?;
+    if section_size != SECTION_SIZE {
+        return Err(bad(W, 8, format!("section records of {section_size:#x} bytes")));
     }
-    let n = r.u16le(0xb4)? as usize;
+    let n = usize::from(r.u16le(0xb4)?);
     if n > MAX_LODS {
         return Err(bad(
             W,
@@ -405,24 +437,25 @@ pub fn read(d: &[u8]) -> Result<MeshSet> {
     let (name_, [short_name]) = name(&r, 0x68, [0x70])?;
     let mut lods = Vec::with_capacity(n);
     for l in 0..n {
-        let at = ptr(&r, 0x30 + 8 * l)?;
-        let count = r.u32le(at + 8)? as usize;
-        let first = ptr(&r, at + 0x0c)?;
-        let (lod_name, name_parts) = name(&r, at + 0x8c, [at + 0x94, at + 0x9c])?;
+        let at = ptr(&r, crate::at(0x30, l, 8))?;
+        let field = |k: usize| plus(at, k);
+        let count = r.size32le(field(8))?;
+        let first = ptr(&r, field(0x0c))?;
+        let (lod_name, name_parts) = name(&r, field(0x8c), [field(0x94), field(0x9c)])?;
         let mut lists: [Vec<u8>; LISTS] = Default::default();
         for (k, list) in lists.iter_mut().enumerate() {
-            let c = r.u32le(at + 0x14 + 12 * k)? as usize;
-            *list = r.bytes(ptr(&r, at + 0x18 + 12 * k)?, c)?.to_vec();
+            let c = r.size32le(crate::at(field(0x14), k, 12))?;
+            *list = r.bytes(ptr(&r, crate::at(field(0x18), k, 12))?, c)?.to_vec();
         }
         let bone_masks = match lod_size {
-            LOD_MASKS => opt_ptr(&r, at + 0xb0)?
+            LOD_MASKS => opt_ptr(&r, field(0xb0))?
                 .map(|p| items(&r, p, count, MASK, |a| r.arr(a)))
                 .transpose()?,
             _ => None,
         };
         let bone_map = match lod_size {
-            LOD_MAP => opt_ptr(&r, at + 0xb4)?
-                .map(|p| items(&r, p, r.u32le(at + 0xb0)? as usize, 4, |a| r.u32le(a)))
+            LOD_MAP => opt_ptr(&r, field(0xb4))?
+                .map(|p| items(&r, p, r.size32le(field(0xb0))?, 4, |a| r.u32le(a)))
                 .transpose()?,
             _ => None,
         };
@@ -438,46 +471,47 @@ pub fn read(d: &[u8]) -> Result<MeshSet> {
                         _ => None,
                     })
                     .collect::<Vec<_>>(),
-            ),
+            )?,
             name: lod_name,
             name_parts,
             lists,
-            chunk: r.arr(at + 0x74)?,
-            index_size: match r.u32le(at + 0x54)? {
+            chunk: r.arr(field(0x74))?,
+            index_size: match r.u32le(field(0x54))? {
                 0x21 => 2,
                 0x2e => 4,
-                f => return Err(bad(W, at + 0x54, format!("unknown index format {f:#x}"))),
+                f => return Err(bad(W, field(0x54), format!("unknown index format {f:#x}"))),
             },
-            index_bytes: r.u32le(at + 0x58)?,
-            vertex_bytes: r.u32le(at + 0x5c)?,
+            index_bytes: r.u32le(field(0x58))?,
+            vertex_bytes: r.u32le(field(0x5c))?,
             sections: Vec::with_capacity(capacity(W, count, SECTION_SIZE, d.len())?),
             bone_masks,
             bone_map,
         };
         for s in 0..count {
-            let o = first + SECTION_SIZE * s;
-            let decl = Decl::read(&r.arr(o + DECL_AT)?)?;
-            let draw_decl = Decl::read(&r.arr(o + DECL2_AT)?)?;
+            let o = crate::at(first, s, SECTION_SIZE);
+            let field = |k: usize| plus(o, k);
+            let decl = Decl::read(&r.arr(field(DECL_AT))?)?;
+            let draw_decl = Decl::read(&r.arr(field(DECL2_AT))?)?;
             check_draw(&decl, &draw_decl).map_err(|d| bad(W, o, d))?;
             let sec = Section {
                 at: o,
-                record: without_pointers(r.bytes(o, SECTION_SIZE)?, &[0x08, 0x10]),
-                name: r.cstr(ptr(&r, o + 8)?)?,
-                key: r.u64le(o + KEY_AT)?,
+                record: without_pointers(r.bytes(o, SECTION_SIZE)?, &[0x08, 0x10])?,
+                name: r.cstr(ptr(&r, field(8))?)?,
+                key: r.u64le(field(KEY_AT))?,
                 decl,
                 draw_decl,
-                flags: r.u8(o + 0x1b)?,
-                stride: r.u8(o + 0x1e)?,
-                primitives: r.u32le(o + 0x20)?,
-                start_index: r.u32le(o + 0x24)?,
-                vertex_offset: r.u32le(o + 0x28)?,
-                vertices: r.u32le(o + 0x2c)?,
-                bones: match r.u16le(o + 0x18)? as usize {
+                flags: r.u8(field(0x1b))?,
+                stride: r.u8(field(0x1e))?,
+                primitives: r.u32le(field(0x20))?,
+                start_index: r.u32le(field(0x24))?,
+                vertex_offset: r.u32le(field(0x28))?,
+                vertices: r.u32le(field(0x2c))?,
+                bones: match usize::from(r.u16le(field(0x18))?) {
                     0 => Vec::new(),
-                    c => items(&r, ptr(&r, o + 0x10)?, c, 2, |a| r.u16le(a))?,
+                    c => items(&r, ptr(&r, field(0x10))?, c, 2, |a| r.u16le(a))?,
                 },
             };
-            if sec.stride as usize != sec.decl.stride() {
+            if usize::from(sec.stride) != sec.decl.stride() {
                 return Err(bad(
                     W,
                     o,
@@ -488,7 +522,7 @@ pub fn read(d: &[u8]) -> Result<MeshSet> {
                     ),
                 ));
             }
-            if r.u32le(o + 0x54)? != sec.vertex_offset || r.u32le(o + 0x140)? != sec.start_index {
+            if r.u32le(field(0x54))? != sec.vertex_offset || r.u32le(field(0x140))? != sec.start_index {
                 return Err(bad(W, o, "repeated vertex offset / start index differ"));
             }
             for e in &sec.decl.elements {
@@ -497,9 +531,9 @@ pub fn read(d: &[u8]) -> Result<MeshSet> {
                 let stride = *sec
                     .decl
                     .strides
-                    .get(e.stream as usize)
+                    .get(usize::from(e.stream))
                     .ok_or_else(|| bad(W, o, "element stream out of range"))?;
-                if e.offset as usize + size > stride as usize {
+                if usize::from(e.offset).saturating_add(size) > usize::from(stride) {
                     return Err(bad(W, o, "element runs past its stream"));
                 }
             }
@@ -507,8 +541,9 @@ pub fn read(d: &[u8]) -> Result<MeshSet> {
         }
         let vend = lod.sections.iter().map(Section::vertex_end).max().unwrap_or(0);
         if !lod.vertex_bytes.is_multiple_of(16)
-            || (lod.vertex_bytes as usize) < vend
-            || lod.vertex_bytes as usize - vend >= 16
+            || wide(lod.vertex_bytes)
+                .checked_sub(vend)
+                .is_none_or(|slack| slack >= 16)
         {
             return Err(bad(
                 W,
@@ -522,10 +557,16 @@ pub fn read(d: &[u8]) -> Result<MeshSet> {
         let iend = lod
             .sections
             .iter()
-            .map(|s| usize::from(lod.index_size) * (s.start_index as usize + 3 * s.primitives as usize))
+            .map(|s| {
+                usize::from(lod.index_size)
+                    .saturating_mul(wide(s.start_index).saturating_add(wide(s.primitives).saturating_mul(3)))
+            })
             .max()
             .unwrap_or(0);
-        if (lod.index_bytes as usize) < iend || lod.index_bytes as usize - iend >= 4 {
+        if wide(lod.index_bytes)
+            .checked_sub(iend)
+            .is_none_or(|slack| slack >= 4)
+        {
             return Err(bad(
                 W,
                 at,
@@ -539,7 +580,7 @@ pub fn read(d: &[u8]) -> Result<MeshSet> {
     }
     let (mut bone_ids, mut bone_bounds) = (None, None);
     if header_size == HEADER_BONES {
-        let (bones, bounded) = (r.u16le(0xc4)? as usize, r.u16le(0xc6)? as usize);
+        let (bones, bounded) = (usize::from(r.u16le(0xc4)?), usize::from(r.u16le(0xc6)?));
         if let Some(p) = opt_ptr(&r, 0xc8)? {
             bone_ids = Some(items(&r, p, bounded, 2, |a| r.u16le(a))?);
         }
@@ -552,7 +593,7 @@ pub fn read(d: &[u8]) -> Result<MeshSet> {
         header: without_pointers(
             r.bytes(0, header_size)?,
             &(0..MAX_LODS)
-                .map(|l| 0x30 + 8 * l)
+                .map(|l| crate::at(0x30, l, 8))
                 .chain([0x68, 0x70])
                 .chain(if header_size == HEADER_BONES {
                     vec![0xc8, 0xd0]
@@ -560,7 +601,7 @@ pub fn read(d: &[u8]) -> Result<MeshSet> {
                     vec![]
                 })
                 .collect::<Vec<_>>(),
-        ),
+        )?,
         name: name_,
         short_name,
         lods,
@@ -574,25 +615,24 @@ pub fn read(d: &[u8]) -> Result<MeshSet> {
 /// documentation's).
 fn pointer_fields(m: &MeshSet, lod_at: &[usize], sec_at: &[Vec<usize>]) -> Vec<usize> {
     let mut f = Vec::new();
-    for (l, lod) in m.lods.iter().enumerate() {
-        let at = lod_at[l];
-        f.push(at + 0x0c);
-        for (s, sec) in lod.sections.iter().enumerate() {
-            f.push(sec_at[l][s] + 8);
+    for ((lod, &at), secs) in m.lods.iter().zip(lod_at).zip(sec_at) {
+        f.push(plus(at, 0x0c));
+        for (sec, &o) in lod.sections.iter().zip(secs) {
+            f.push(plus(o, 8));
             if !sec.bones.is_empty() {
-                f.push(sec_at[l][s] + 0x10);
+                f.push(plus(o, 0x10));
             }
         }
-        f.extend((0..LISTS).map(|k| at + 0x18 + 12 * k));
-        f.extend([at + 0x8c, at + 0x94, at + 0x9c]);
+        f.extend((0..LISTS).map(|k| crate::at(plus(at, 0x18), k, 12)));
+        f.extend([plus(at, 0x8c), plus(at, 0x94), plus(at, 0x9c)]);
         if lod.bone_masks.is_some() {
-            f.push(at + 0xb0);
+            f.push(plus(at, 0xb0));
         }
         if lod.bone_map.is_some() {
-            f.push(at + 0xb4);
+            f.push(plus(at, 0xb4));
         }
     }
-    f.extend((0..m.lods.len()).map(|l| 0x30 + 8 * l));
+    f.extend((0..m.lods.len()).map(|l| crate::at(0x30, l, 8)));
     f.extend([0x68, 0x70]);
     if m.bone_ids.is_some() {
         f.push(0xc8);
@@ -609,9 +649,9 @@ fn pointer_fields(m: &MeshSet, lod_at: &[usize], sec_at: &[Vec<usize>]) -> Vec<u
 /// keeps; ReSkate Studio's in its template's).
 pub fn read_resource(d: &[u8], meta: &[u8; 16]) -> Result<MeshSet> {
     let mut m = read(d)?;
-    let w = |i: usize| word(meta, 4 * i) as usize;
+    let w = |i: usize| wide(word(meta, crate::at(0, i, 4)));
     let (table, size, trailing) = (w(0), w(1), w(2));
-    let end = crate::align(table + size, 16);
+    let end = crate::align(plus(table, size), 16);
     if w(3) != 0 || !size.is_multiple_of(4) || end.checked_add(trailing) != Some(d.len()) {
         return Err(bad(
             W,
@@ -627,7 +667,7 @@ pub fn read_resource(d: &[u8], meta: &[u8; 16]) -> Result<MeshSet> {
         .map(|l| l.sections.iter().map(|s| s.at).collect())
         .collect();
     let fields = pointer_fields(&m, &lod_at, &sec_at);
-    let mut stored = items(&r, table, size / 4, 4, |a| r.u32le(a).map(|v| v as usize + 16))?;
+    let mut stored = items(&r, table, size / 4, 4, |a| r.u32le(a).map(|v| plus(wide(v), 16)))?;
     let mut fields = fields;
     stored.sort_unstable();
     fields.sort_unstable();
@@ -642,12 +682,27 @@ pub fn read_resource(d: &[u8], meta: &[u8; 16]) -> Result<MeshSet> {
             ),
         ));
     }
-    m.tail = d[end..].to_vec();
+    m.tail = d
+        .get(end..)
+        .ok_or_else(|| bad(W, end, "trailing data past the end"))?
+        .to_vec();
     Ok(m)
 }
 
-fn put(out: &mut [u8], at: usize, v: &[u8]) {
-    out[at..at + v.len()].copy_from_slice(v);
+/// Writes `v` at `at` of a record or block being built.
+fn put(out: &mut [u8], at: usize, v: &[u8]) -> Result<()> {
+    let total = out.len();
+    at.checked_add(v.len())
+        .and_then(|end| out.get_mut(at..end))
+        .ok_or_else(|| {
+            bad(
+                W,
+                at,
+                format!("{} bytes past the end of the {total}-byte block", v.len()),
+            )
+        })?
+        .copy_from_slice(v);
+    Ok(())
 }
 
 fn pad(out: &mut Vec<u8>, a: usize) {
@@ -665,7 +720,7 @@ fn push_named<const N: usize>(
     let mut places = [0; N];
     for (place, part) in places.iter_mut().zip(parts) {
         *place = match part {
-            NamePart::At(o) if *o <= s.len() => at + o,
+            NamePart::At(o) if *o <= s.len() => plus(at, *o),
             NamePart::At(o) => return Err(bad(W, at, format!("part at {o} of {s:?}, past its end"))),
             NamePart::Own(p) => push_name(out, p)?,
         };
@@ -691,6 +746,15 @@ fn u32_of(n: usize, what: &str) -> Result<[u8; 4]> {
         .map_err(|_| bad(W, 0, format!("{n} {what}")))
 }
 
+/// Entry `i` of a table the writer built beside the records; an error when the layout has none (the tables are built
+/// from the same MeshSet, so this does not happen).
+fn nth<T: Copy>(table: &[T], i: usize, what: &str) -> Result<T> {
+    table
+        .get(i)
+        .copied()
+        .ok_or_else(|| bad(W, i, format!("no {what} {i} in the layout")))
+}
+
 fn u16_of(n: usize, at: usize, what: &str) -> Result<[u8; 2]> {
     u16::try_from(n)
         .map(u16::to_le_bytes)
@@ -698,8 +762,12 @@ fn u16_of(n: usize, at: usize, what: &str) -> Result<[u8; 2]> {
 }
 
 /// Write the pointer field `at` naming `target`.
-fn pointer(out: &mut [u8], at: usize, target: usize) {
-    put(out, at, &(target as u64 - 16).to_le_bytes());
+fn pointer(out: &mut [u8], at: usize, target: usize) -> Result<()> {
+    let relative = u64::try_from(target)
+        .ok()
+        .and_then(|t| t.checked_sub(16))
+        .ok_or_else(|| bad(W, at, format!("a pointer to {target:#x}")))?;
+    put(out, at, &relative.to_le_bytes())
 }
 
 /// The MeshSet written in the layout of the module documentation (the game's own order), and its resource
@@ -708,11 +776,11 @@ fn pointer(out: &mut [u8], at: usize, target: usize) {
 /// their counts, counts past their fields, name parts outside their names.
 pub fn write(m: &MeshSet) -> Result<(Vec<u8>, [u8; 16])> {
     let hs = m.header.len();
-    if (hs != HEADER && hs != HEADER_BONES) || word(&m.header, 0) as usize + 16 != hs {
+    if (hs != HEADER && hs != HEADER_BONES) || wide(word(&m.header, 0)).saturating_add(16) != hs {
         return Err(bad(W, 0, format!("a header of {hs:#x} bytes")));
     }
     let lod_size = m.lod_size();
-    if ![LOD_PLAIN, LOD_MASKS, LOD_MAP].contains(&lod_size) || word(&m.header, 8) as usize != SECTION_SIZE {
+    if ![LOD_PLAIN, LOD_MASKS, LOD_MAP].contains(&lod_size) || wide(word(&m.header, 8)) != SECTION_SIZE {
         return Err(bad(W, 4, "LOD or section records of an unknown size"));
     }
     if m.lods.len() > MAX_LODS {
@@ -810,73 +878,81 @@ pub fn write(m: &MeshSet) -> Result<(Vec<u8>, [u8; 16])> {
     });
     pad(&mut out, 16);
     // the records' fields
-    let mut s_i = 0;
+    let mut s_i = 0usize;
     for (l, lod) in m.lods.iter().enumerate() {
-        let at = lod_at[l];
-        put(&mut out, at + 8, &u32_of(lod.sections.len(), "sections")?);
-        let first = sec_at[l].first().copied().unwrap_or(16);
-        pointer(&mut out, at + 0x0c, first);
+        let at = nth(&lod_at, l, "LOD record")?;
+        let field = |k: usize| plus(at, k);
+        put(&mut out, field(8), &u32_of(lod.sections.len(), "sections")?)?;
+        let first = nth_row(&sec_at, l)?.first().copied().unwrap_or(16);
+        pointer(&mut out, field(0x0c), first)?;
         for (k, list) in lod.lists.iter().enumerate() {
-            put(&mut out, at + 0x14 + 12 * k, &u32_of(list.len(), "list entries")?);
-            pointer(&mut out, at + 0x18 + 12 * k, lists_at[LISTS * l + k]);
+            put(
+                &mut out,
+                crate::at(field(0x14), k, 12),
+                &u32_of(list.len(), "list entries")?,
+            )?;
+            let list_at = nth(&lists_at, crate::at(k, l, LISTS), "list")?;
+            pointer(&mut out, crate::at(field(0x18), k, 12), list_at)?;
         }
         let format: u32 = match lod.index_size {
             2 => 0x21,
             4 => 0x2e,
-            n => return Err(bad(W, at + 0x54, format!("LOD {l}: {n}-byte indices"))),
+            n => return Err(bad(W, field(0x54), format!("LOD {l}: {n}-byte indices"))),
         };
-        put(&mut out, at + 0x54, &format.to_le_bytes());
-        put(&mut out, at + 0x58, &lod.index_bytes.to_le_bytes());
-        put(&mut out, at + 0x5c, &lod.vertex_bytes.to_le_bytes());
-        put(&mut out, at + 0x74, &lod.chunk);
-        let (name_at, [path_at, last_at]) = lod_name_at[l];
-        pointer(&mut out, at + 0x8c, name_at);
-        pointer(&mut out, at + 0x94, path_at);
-        pointer(&mut out, at + 0x9c, last_at);
+        put(&mut out, field(0x54), &format.to_le_bytes())?;
+        put(&mut out, field(0x58), &lod.index_bytes.to_le_bytes())?;
+        put(&mut out, field(0x5c), &lod.vertex_bytes.to_le_bytes())?;
+        put(&mut out, field(0x74), &lod.chunk)?;
+        let (name_at, [path_at, last_at]) = nth(&lod_name_at, l, "LOD name")?;
+        pointer(&mut out, field(0x8c), name_at)?;
+        pointer(&mut out, field(0x94), path_at)?;
+        pointer(&mut out, field(0x9c), last_at)?;
         match (lod_size, &lod.bone_masks, &lod.bone_map) {
-            (LOD_MASKS, Some(_), _) => pointer(&mut out, at + 0xb0, tables_at[l]),
-            (LOD_MASKS, None, _) => put(&mut out, at + 0xb0, &[0; 8]),
+            (LOD_MASKS, Some(_), _) => pointer(&mut out, field(0xb0), nth(&tables_at, l, "bone table")?)?,
+            (LOD_MASKS, None, _) => put(&mut out, field(0xb0), &[0; 8])?,
             (LOD_MAP, _, Some(map)) => {
-                put(&mut out, at + 0xb0, &u32_of(map.len(), "mapped bones")?);
-                pointer(&mut out, at + 0xb4, tables_at[l]);
+                put(&mut out, field(0xb0), &u32_of(map.len(), "mapped bones")?)?;
+                pointer(&mut out, field(0xb4), nth(&tables_at, l, "bone table")?)?;
             }
-            (LOD_MAP, _, None) => put(&mut out, at + 0xb0, &[0; 12]),
+            (LOD_MAP, _, None) => put(&mut out, field(0xb0), &[0; 12])?,
             _ => {}
         }
         for (s, sec) in lod.sections.iter().enumerate() {
-            let o = sec_at[l][s];
-            pointer(&mut out, o + 8, names_at[s_i]);
+            let o = nth(nth_row(&sec_at, l)?, s, "section record")?;
+            let field = |k: usize| plus(o, k);
+            pointer(&mut out, field(8), nth(&names_at, s_i, "section name")?)?;
             if sec.bones.is_empty() {
-                put(&mut out, o + 0x10, &[0; 8]);
+                put(&mut out, field(0x10), &[0; 8])?;
             } else {
-                pointer(&mut out, o + 0x10, bones_at[s_i]);
+                pointer(&mut out, field(0x10), nth(&bones_at, s_i, "bone list")?)?;
             }
-            put(&mut out, o + 0x18, &u16_of(sec.bones.len(), o, "bones")?);
-            out[o + 0x1b] = sec.flags;
-            out[o + 0x1e] = sec.stride;
-            put(&mut out, o + 0x20, &sec.primitives.to_le_bytes());
-            put(&mut out, o + 0x24, &sec.start_index.to_le_bytes());
-            put(&mut out, o + 0x140, &sec.start_index.to_le_bytes());
-            put(&mut out, o + 0x28, &sec.vertex_offset.to_le_bytes());
-            put(&mut out, o + 0x54, &sec.vertex_offset.to_le_bytes());
-            put(&mut out, o + 0x2c, &sec.vertices.to_le_bytes());
-            put(&mut out, o + DECL_AT, &sec.decl.bytes);
-            put(&mut out, o + DECL2_AT, &sec.draw_decl.bytes);
-            put(&mut out, o + KEY_AT, &sec.key.to_le_bytes());
-            s_i += 1;
+            put(&mut out, field(0x18), &u16_of(sec.bones.len(), o, "bones")?)?;
+            put(&mut out, field(0x1b), &[sec.flags])?;
+            put(&mut out, field(0x1e), &[sec.stride])?;
+            put(&mut out, field(0x20), &sec.primitives.to_le_bytes())?;
+            put(&mut out, field(0x24), &sec.start_index.to_le_bytes())?;
+            put(&mut out, field(0x140), &sec.start_index.to_le_bytes())?;
+            put(&mut out, field(0x28), &sec.vertex_offset.to_le_bytes())?;
+            put(&mut out, field(0x54), &sec.vertex_offset.to_le_bytes())?;
+            put(&mut out, field(0x2c), &sec.vertices.to_le_bytes())?;
+            put(&mut out, field(DECL_AT), &sec.decl.bytes)?;
+            put(&mut out, field(DECL2_AT), &sec.draw_decl.bytes)?;
+            put(&mut out, field(KEY_AT), &sec.key.to_le_bytes())?;
+            s_i = s_i.saturating_add(1);
         }
     }
     for l in 0..MAX_LODS {
+        let field = crate::at(0x30, l, 8);
         match lod_at.get(l) {
-            Some(&at) => pointer(&mut out, 0x30 + 8 * l, at),
-            None => put(&mut out, 0x30 + 8 * l, &[0; 8]),
+            Some(&at) => pointer(&mut out, field, at)?,
+            None => put(&mut out, field, &[0; 8])?,
         }
     }
-    put(&mut out, 0xb4, &u16_of(m.lods.len(), 0xb4, "LODs")?);
-    pointer(&mut out, 0x68, name_at);
-    pointer(&mut out, 0x70, short_at);
+    put(&mut out, 0xb4, &u16_of(m.lods.len(), 0xb4, "LODs")?)?;
+    pointer(&mut out, 0x68, name_at)?;
+    pointer(&mut out, 0x70, short_at)?;
     if hs == HEADER_BONES {
-        let bones = u16::from_le_bytes([out[0xc4], out[0xc5]]) as usize;
+        let bones = usize::from(Rd::new(&out, W).u16le(0xc4)?);
         let bounded = m.bone_ids.as_ref().map_or(0, Vec::len);
         let bounds_for = if m.bone_ids.is_some() { bounded } else { bones };
         if m.bone_bounds.as_ref().is_some_and(|b| b.len() != bounds_for) {
@@ -886,27 +962,34 @@ pub fn write(m: &MeshSet) -> Result<(Vec<u8>, [u8; 16])> {
                 format!("bone bounds for other than {bounds_for} bones"),
             ));
         }
-        put(&mut out, 0xc6, &u16_of(bounded, 0xc6, "bounded bones")?);
+        put(&mut out, 0xc6, &u16_of(bounded, 0xc6, "bounded bones")?)?;
         match ids_at {
-            Some(at) => pointer(&mut out, 0xc8, at),
-            None => put(&mut out, 0xc8, &[0; 8]),
+            Some(at) => pointer(&mut out, 0xc8, at)?,
+            None => put(&mut out, 0xc8, &[0; 8])?,
         }
         match bounds_at {
-            Some(at) => pointer(&mut out, 0xd0, at),
-            None => put(&mut out, 0xd0, &[0; 8]),
+            Some(at) => pointer(&mut out, 0xd0, at)?,
+            None => put(&mut out, 0xd0, &[0; 8])?,
         }
     }
     // the relocation table
     let table = out.len();
     for f in pointer_fields(m, &lod_at, &sec_at) {
-        out.extend(u32_of(f - 16, "bytes")?);
+        out.extend(u32_of(f.saturating_sub(16), "bytes")?);
     }
-    let size = out.len() - table;
+    let size = out.len().saturating_sub(table);
     pad(&mut out, 16);
     out.extend(&m.tail);
     let mut meta = [0u8; 16];
-    put(&mut meta, 0, &u32_of(table, "bytes")?);
-    put(&mut meta, 4, &u32_of(size, "bytes")?);
-    put(&mut meta, 8, &u32_of(m.tail.len(), "bytes")?);
+    put(&mut meta, 0, &u32_of(table, "bytes")?)?;
+    put(&mut meta, 4, &u32_of(size, "bytes")?)?;
+    put(&mut meta, 8, &u32_of(m.tail.len(), "bytes")?)?;
     Ok((out, meta))
+}
+
+/// Row `l` of the section offsets the writer built.
+fn nth_row(rows: &[Vec<usize>], l: usize) -> Result<&[usize]> {
+    rows.get(l)
+        .map(Vec::as_slice)
+        .ok_or_else(|| bad(W, l, format!("no section row {l} in the layout")))
 }

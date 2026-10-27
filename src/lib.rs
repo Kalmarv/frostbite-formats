@@ -14,19 +14,30 @@
 //!   tangent frame ([`tangent`]), physics resources ([`physics`]), skeleton assets ([`skeleton`]) and texture
 //!   headers ([`texture`]).
 //!
-//! It was written against the skate. build installed from the game and against the files ReSkate Studio
-//! (20261012) writes; other Frostbite titles are not assumed to match. It is an independent reader of the stored
-//! format and contains no code from Frosty or FrostyToolsuite. The [`ebx`] module is a port of ReSkate's EBX
-//! reader, writer and merge (GPL-3.0-or-later).
+//! It was written against the skate. build installed from the game and the files ReSkate Studio (20261012) writes;
+//! other Frostbite titles are not assumed to match. It is an independent reader of the stored formats with no code
+//! from Frosty or FrostyToolsuite, except that the [`ebx`] module is a port of ReSkate's EBX reader, writer and merge
+//! (GPL-3.0-or-later).
 //!
-//! # Behaviour
+//! # What it guarantees
 //!
-//! Readers are strict and bounds-checked: they walk to the exact end of what they read and refuse what they do not
-//! know, with an error that names what was being read, the offset and what was expected. They are not yet
-//! guaranteed panic-free on arbitrary bytes, but library code denies unchecked indexing, arithmetic and narrowing casts, so a stored offset, count or size that does not fit is an [`Error`] (`tests/robust.rs` pins the cases found). Writers are the readers' counterparts: what a reader accepts is written back byte for byte
-//! (TOCs only in the Patch layout, with plain names; an EBX document when it already has the writer's layout), or the
-//! writer says why it cannot. The crate holds no game data and no keys. Oodle-compressed CAS blocks are decoded through the caller's own
-//! handle to the game's Oodle library ([`cas::Cas`]); the library is not shipped.
+//! - **Checked reads.** Readers are bounds-checked: a file that is truncated or does not hold to the format returns
+//!   an [`Error`] that names what was being read, the offset and what was expected. Counts read from a file are checked
+//!   against the bytes that remain before a table is reserved for them. Library code denies unchecked indexing,
+//!   arithmetic and narrowing casts, so a stored offset, count or size that does not fit is an error, not a panic;
+//!   the crate does not promise to be panic-free on arbitrary bytes, and the few items that allow one of those lints
+//!   say why.
+//! - **Strict readers.** They walk to the exact end of what they read and refuse a value they do not know instead of
+//!   guessing; fields whose meaning is not known are kept as stored.
+//! - **Writers are the readers' counterparts.** What a reader accepts is written back byte for byte (TOCs only in the
+//!   Patch layout, with plain names; an EBX document when it already has the writer's layout), or the writer says
+//!   why it cannot.
+//! - **No game data, no hidden I/O.** The crate holds no game data and no keys, and touches files only in [`folder`].
+//!   Oodle-compressed CAS blocks are decoded through the caller's own handle to the game's Oodle library
+//!   ([`cas::Cas`]); the library is not shipped.
+//!
+//! It does not decode pixels, vertices or shader code (only the headers, tables and records around them), does not
+//! read other Frostbite games, and reads whole files into memory.
 //!
 //! # Example
 //!

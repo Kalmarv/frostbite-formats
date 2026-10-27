@@ -126,7 +126,7 @@ pub mod format {
 pub struct Element {
     /// The element's usage ([`usage`]).
     pub usage: u8,
-    /// The element's format ([`format`]); [`format::size`] gives its size.
+    /// The element's format ([`mod@format`]); [`format::size`] gives its size.
     pub format: u8,
     /// Byte offset of the element within its stream's vertex.
     pub offset: u8,

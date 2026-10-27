@@ -3,7 +3,7 @@
 //! the arrays and strings they point at), strings (deduplicated, in first-use order) and the fixup tables.
 use std::collections::BTreeMap;
 
-use super::decode::align_up;
+use super::decode::{align_up, narrow_f32};
 use super::{
     ArrayRecord, BoxedRef, BoxedValueRecord, Document, FieldDescriptor, FieldType, Object, Pointer, Value,
 };
@@ -62,6 +62,8 @@ fn int(v: Option<&Value>, lo: i128, hi: i128) -> Result<i128> {
     Ok(x)
 }
 
+/// A value as a float of the field's width. A NaN or an infinity is a float like any other (stock documents hold
+/// both, and a rewrite keeps their bits); a finite value an `f32` field cannot hold is an error.
 fn float(v: Option<&Value>, single: bool) -> Result<f64> {
     let x = match v {
         Some(Value::Float(f)) => *f,
@@ -70,7 +72,7 @@ fn float(v: Option<&Value>, single: bool) -> Result<f64> {
         Some(Value::Bool(b)) => f64::from(u8::from(*b)),
         _ => 0.0,
     };
-    if !x.is_finite() || (single && x.abs() > f64::from(f32::MAX)) {
+    if single && x.is_finite() && x.abs() > f64::from(f32::MAX) {
         return Err(bad(
             W,
             0,
@@ -296,10 +298,6 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "float() refuses a value that does not fit an f32 first"
-    )]
     fn write_scalar(&mut self, f: &FieldDescriptor, position: usize, v: Option<&Value>) -> Result<()> {
         use FieldType::*;
         match f.ty() {
@@ -324,7 +322,7 @@ impl<'a> Builder<'a> {
                 &narrow::<i64>(int(v, i128::from(i64::MIN), i128::from(i64::MAX))?)?.to_le_bytes(),
             )?,
             UInt64 => self.put_u64(position, narrow(int(v, 0, i128::from(u64::MAX))?)?)?,
-            Float32 => self.put(position, &(float(v, true)? as f32).to_le_bytes())?,
+            Float32 => self.put(position, &narrow_f32(float(v, true)?).to_le_bytes())?,
             Float64 => self.put(position, &float(v, false)?.to_le_bytes())?,
             Guid => {
                 let g = match v {
@@ -387,6 +385,16 @@ impl<'a> Builder<'a> {
                     Some(Value::TypeRef(t)) => t.encoded,
                     _ => 0,
                 };
+                if encoded != 0 && encoded & 0x8000_0000 == 0 {
+                    let slot = (encoded >> 2) as usize;
+                    if slot >= self.doc.fixup_type_guids.len() {
+                        return Err(bad(
+                            W,
+                            position,
+                            "type reference names a type the document does not list",
+                        ));
+                    }
+                }
                 self.put_u32(position, encoded)?;
                 self.put_u32(position.saturating_add(4), 0)?;
                 if encoded != 0 && f.ty() == TypeRef {

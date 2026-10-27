@@ -253,7 +253,10 @@ fn meaning(d: &Document) -> String {
                     walk(d, &mut f.value);
                 }
             }
-            Value::TypeRef(t) => t.descriptor = None,
+            // a NaN's bits are part of its value, and `Debug` prints them all as `NaN`
+            Value::Float(f) if f.is_nan() => {
+                *v = Value::Str(format!("NaN {:#018x}", f.to_bits()).into_bytes())
+            }
             _ => {}
         }
     }

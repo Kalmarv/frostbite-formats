@@ -20,6 +20,33 @@ const RFL2: u32 = 0x5246_4C32;
 /// How deep types may nest (a type naming itself as its base or member fails instead of recursing forever).
 const MAX_DEPTH: u32 = 128;
 
+/// The 32-bit float with bits `bits` as an `f64`. A NaN widens by moving its sign and shifting its payload, so a
+/// signalling NaN stays signalling and [`narrow_f32`] gives the bits back; every other value converts exactly.
+pub(super) fn widen_f32(bits: u32) -> f64 {
+    let f = f32::from_bits(bits);
+    if !f.is_nan() {
+        return f64::from(f);
+    }
+    let sign = u64::from(bits >> 31) << 63;
+    f64::from_bits(sign | 0x7FF0_0000_0000_0000 | (u64::from(bits & 0x007F_FFFF) << 29))
+}
+
+/// The bits of the 32-bit float an `f64` stands for: the inverse of [`widen_f32`] for a NaN (its top 23 payload bits;
+/// a NaN whose payload is lost stays a NaN, quiet), the nearest `f32` otherwise.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "a finite value is rounded to the nearest f32 (callers refuse one beyond f32::MAX); a NaN's fields are masked to fit"
+)]
+pub(super) fn narrow_f32(x: f64) -> u32 {
+    if !x.is_nan() {
+        return (x as f32).to_bits();
+    }
+    let bits = x.to_bits();
+    let payload = ((bits >> 29) & 0x007F_FFFF) as u32;
+    let quiet = if payload == 0 { 0x0040_0000 } else { 0 };
+    (((bits >> 63) as u32) << 31) | 0x7F80_0000 | payload | quiet
+}
+
 pub(crate) fn align_up(v: usize, a: usize) -> usize {
     if a <= 1 {
         v
@@ -611,7 +638,7 @@ impl<'a> Values<'a> {
             FieldType::UInt32 => Value::UInt(u64::from(r.u32(Endian::Little)?)),
             FieldType::Int64 => Value::Int(r.i64(Endian::Little)?),
             FieldType::UInt64 => Value::UInt(r.u64(Endian::Little)?),
-            FieldType::Float32 => Value::Float(f64::from(f32::from_le_bytes(r.array()?))),
+            FieldType::Float32 => Value::Float(widen_f32(u32::from_le_bytes(r.array()?))),
             FieldType::Float64 => Value::Float(f64::from_le_bytes(r.array()?)),
             FieldType::Guid => Value::Guid(r.array()?),
             FieldType::Sha1 => Value::Sha1(r.array()?),
@@ -655,7 +682,7 @@ impl<'a> Values<'a> {
                     Value::TypeRef(TypeRef {
                         primitive: false,
                         primitive_type: None,
-                        descriptor: None,
+                        fixup_type: None,
                         encoded: 0,
                     })
                 } else if encoded & 0x8000_0000 != 0 {
@@ -663,14 +690,14 @@ impl<'a> Values<'a> {
                     Value::TypeRef(TypeRef {
                         primitive: true,
                         primitive_type: Some(FieldType::from_bits(u16::try_from(bits).unwrap_or_default())),
-                        descriptor: None,
+                        fixup_type: None,
                         encoded,
                     })
                 } else {
                     Value::TypeRef(TypeRef {
                         primitive: false,
                         primitive_type: None,
-                        descriptor: Some((encoded >> 2) as usize),
+                        fixup_type: Some((encoded >> 2) as usize),
                         encoded,
                     })
                 }

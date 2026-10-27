@@ -2,7 +2,7 @@
 //! when it merges two documents' edits of one asset).
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{Document, FieldType, FieldValue, Instance, Object, Pointer, Value};
+use super::{Document, FieldType, FieldValue, Instance, Object, Pointer, TypeRef, Value};
 use crate::{Result, bad};
 
 const W: &str = "EBX carry";
@@ -16,6 +16,11 @@ fn ensure_fixup_type(doc: &mut Document, descriptor: usize) -> Result<u16> {
         .get(descriptor)
         .ok_or_else(|| bad(W, 0, "type descriptor is invalid"))?;
     let (g, s) = (t.guid, t.signature);
+    ensure_fixup_slot(doc, g, s)
+}
+
+/// The EFIX type slot of the type with GUID `g` and signature `s`, added when the document's list lacks it.
+fn ensure_fixup_slot(doc: &mut Document, g: [u8; 16], s: u32) -> Result<u16> {
     let n = doc.fixup_type_guids.len().min(doc.fixup_type_signatures.len());
     let known = (doc.fixup_type_guids.iter().zip(&doc.fixup_type_signatures))
         .position(|(guid, signature)| *guid == g && *signature == s);
@@ -246,6 +251,27 @@ impl<'a> Carrier<'a> {
             .ok_or_else(|| bad(W, 0, format!("needs a type the target does not define: {name}")))
     }
 
+    /// A type reference of `from` as one of `to`: the type it names (by GUID and signature, as the document's type
+    /// list holds it) gets a slot in the target's list when it has none, and the reference points at that slot.
+    fn type_ref(&mut self, t: TypeRef) -> Result<TypeRef> {
+        let Some(slot) = t.fixup_type else {
+            return Ok(t);
+        };
+        let (Some(&guid), Some(&signature)) = (
+            self.from.fixup_type_guids.get(slot),
+            self.from.fixup_type_signatures.get(slot),
+        ) else {
+            return Err(bad(
+                W,
+                slot,
+                "type reference names a type the source does not list with a signature",
+            ));
+        };
+        let to_slot = usize::from(ensure_fixup_slot(self.to, guid, signature)?);
+        t.with_fixup_type(to_slot)
+            .ok_or_else(|| bad(W, to_slot, "type slot does not fit a type reference"))
+    }
+
     fn instance(&mut self, index: usize) -> Result<usize> {
         let from = self.from;
         let src = from
@@ -347,13 +373,7 @@ impl<'a> Carrier<'a> {
             Value::Array(items, h) => {
                 Value::Array(items.iter().map(|x| self.value(x)).collect::<Result<_>>()?, *h)
             }
-            Value::TypeRef(t) if !t.primitive => {
-                let mut t = *t;
-                if let Some(d) = t.descriptor {
-                    t.descriptor = Some(self.ty(d)?);
-                }
-                Value::TypeRef(t)
-            }
+            Value::TypeRef(t) if !t.primitive => Value::TypeRef(self.type_ref(*t)?),
             Value::Boxed(_) => return Err(bad(W, 0, "cannot carry a boxed value yet")),
             other => other.clone(),
         })

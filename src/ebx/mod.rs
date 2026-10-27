@@ -63,10 +63,10 @@ pub enum FieldType {
     Int32 = 0x0F,
     /// An unsigned 32-bit integer.
     UInt32 = 0x10,
-    /// An unsigned 64-bit integer.
-    UInt64 = 0x11,
     /// A signed 64-bit integer.
-    Int64 = 0x12,
+    Int64 = 0x11,
+    /// An unsigned 64-bit integer.
+    UInt64 = 0x12,
     /// A 32-bit float.
     Float32 = 0x13,
     /// A 64-bit float.
@@ -113,8 +113,8 @@ impl FieldType {
             UInt16,
             Int32,
             UInt32,
-            UInt64,
             Int64,
+            UInt64,
             Float32,
             Float64,
             Guid,
@@ -264,17 +264,38 @@ pub enum Pointer {
     External(usize),
 }
 
-/// A type reference value: a primitive type or a type of the document's reflection table.
+/// A type reference value: a primitive type or a type of the document's type list.
+///
+/// A reference to a type of the document is `slot << 2 | low bits` in [`TypeRef::encoded`], where `slot` indexes the
+/// EFIX type list ([`Document::fixup_type_guids`]), the list the instances' types are named from too. It is not an index
+/// into the reflection table: [`Document::type_ref_target`] finds the reflected type a slot names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TypeRef {
     /// Whether the reference names a primitive type rather than a type of the document.
     pub primitive: bool,
     /// The primitive type, when `primitive` is set.
     pub primitive_type: Option<FieldType>,
-    /// Index into [`Document::types`], when the reference names a reflected type.
-    pub descriptor: Option<usize>,
-    /// The reference as stored (u32).
+    /// Index into [`Document::fixup_type_guids`], when the reference names a type of the document (`encoded >> 2`).
+    pub fixup_type: Option<usize>,
+    /// The reference as stored (u32): the writer emits this, so a changed [`TypeRef::fixup_type`] takes effect through
+    /// [`TypeRef::with_fixup_type`]. The low two bits are kept as stored; their meaning is not known.
     pub encoded: u32,
+}
+
+impl TypeRef {
+    /// This reference with its EFIX type list slot replaced and the low two bits of `encoded` kept; `None` when the
+    /// slot does not fit the encoding or the reference is empty or primitive.
+    pub fn with_fixup_type(self, slot: usize) -> Option<TypeRef> {
+        if self.primitive || self.fixup_type.is_none() {
+            return None;
+        }
+        let shifted = u32::try_from(slot).ok().filter(|&s| s < 1 << 29)? << 2;
+        Some(TypeRef {
+            fixup_type: Some(slot),
+            encoded: shifted | (self.encoded & 3),
+            ..self
+        })
+    }
 }
 
 /// A reference to a boxed value in the document's boxed-value section.
@@ -299,7 +320,8 @@ pub enum Value {
     Int(i64),
     /// An unsigned integer of 8, 16, 32 or 64 bits.
     UInt(u64),
-    /// A 32-bit or 64-bit float, widened to `f64`.
+    /// A 32-bit or 64-bit float, widened to `f64`. A NaN keeps the bits it was stored with (a 32-bit NaN widens by
+    /// shifting its payload, quiet or signalling) and is written back with them.
     Float(f64),
     /// String, CString and FileRef values, as stored.
     Str(Vec<u8>),
@@ -417,6 +439,23 @@ pub struct Document {
 }
 
 impl Document {
+    /// The reflected type ([`Document::types`] index) the EFIX type list's `slot` names, by GUID and signature (the
+    /// GUID alone when the list has no signature for the slot); `None` when the slot is past the list or the document
+    /// reflects no such type (the list names GUIDs the reflection table lacks).
+    pub fn fixup_type_target(&self, slot: usize) -> Option<usize> {
+        let guid = self.fixup_type_guids.get(slot)?;
+        let signature = self.fixup_type_signatures.get(slot);
+        self.types
+            .iter()
+            .position(|t| t.guid == *guid && signature.is_none_or(|s| t.signature == *s))
+    }
+
+    /// The reflected type ([`Document::types`] index) a type reference names; `None` for an empty or primitive
+    /// reference and for one whose EFIX slot reflects no type.
+    pub fn type_ref_target(&self, t: &TypeRef) -> Option<usize> {
+        self.fixup_type_target(t.fixup_type?)
+    }
+
     /// The type name of instance `i`.
     pub fn type_name(&self, i: usize) -> Option<&str> {
         let d = self.instances.get(i)?.descriptor?;

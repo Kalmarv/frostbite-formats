@@ -256,3 +256,30 @@ fn corrupt_counts_are_errors() {
     meta[8..12].copy_from_slice(&8u32.to_le_bytes());
     refused(lookup::read_programs(&d, &meta).map(|_| ()));
 }
+
+#[test]
+fn archive_identifiers_round_trip_exactly_or_are_refused() -> R {
+    for id in [
+        0,
+        0x0001_0000_0003_0002,
+        0x0000_0000_0003_0002,
+        0x0000_FFFF_FFFF_FFFF,
+    ] {
+        assert_eq!(Loc::decode(id).map(Loc::encode), Some(id));
+    }
+    // a patch byte other than 0 or 1, or a set top byte, has no `Loc` that would write it back
+    assert_eq!(Loc::decode(0x0002_0000_0003_0002), None);
+    assert_eq!(Loc::decode(0x0100_0000_0003_0002), None);
+
+    let mut region = bundle::write_region(&[(loc(1, 2), 0, 9)], &[])?;
+    let stored = loc(1, 2).encode().to_be_bytes();
+    let at = region.windows(8).position(|w| w == stored).unwrap();
+    region[at + 1] = 2;
+    let err = bundle::read_region(&region).unwrap_err().to_string();
+    assert!(
+        err.contains(&format!("{at:#x}")) || err.contains(&at.to_string()),
+        "{err}"
+    );
+    assert!(err.contains("0 or 1"), "{err}");
+    Ok(())
+}

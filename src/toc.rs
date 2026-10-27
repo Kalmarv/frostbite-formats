@@ -17,7 +17,8 @@ const LEAF: u32 = 0x8000_0000;
 /// Where a file lives: (patch folder or base game, install chunk, archive number).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Loc {
-    /// Whether the file is in a Patch folder (the added or replaced files) rather than the base game: set when any of bits 48..56 of the stored identifier is set.
+    /// Whether the file is in a Patch folder (the added or replaced files) rather than the base game: bits 48..56 of
+    /// the stored identifier, 1 for the Patch folder and 0 for the base game.
     pub patch: bool,
     /// Install chunk number: bits 16..48 of the stored identifier.
     pub chunk: u32,
@@ -26,19 +27,28 @@ pub struct Loc {
 }
 
 impl Loc {
-    /// A `Loc` from the 64-bit identifier a TOC or region stores.
-    pub fn decode(v: u64) -> Self {
-        let [a0, a1, c0, c1, c2, c3, ..] = v.to_le_bytes();
-        Self {
-            patch: v & (0xFF << 48) != 0,
+    /// A `Loc` from the 64-bit identifier a TOC or region stores, or `None` when the identifier holds something a
+    /// `Loc` can't represent (bits 48..56 other than 0 or 1, or any of bits 56..64 set), so that
+    /// [`encode`](Self::encode) gives back exactly the stored identifier.
+    pub fn decode(v: u64) -> Option<Self> {
+        let [a0, a1, c0, c1, c2, c3, patch, top] = v.to_le_bytes();
+        (patch <= 1 && top == 0).then(|| Self {
+            patch: patch == 1,
             chunk: u32::from_le_bytes([c0, c1, c2, c3]),
             archive: u16::from_le_bytes([a0, a1]),
-        }
+        })
     }
     /// The 64-bit identifier a TOC or region stores for this `Loc`.
     pub fn encode(self) -> u64 {
         (u64::from(self.patch) << 48) | (u64::from(self.chunk) << 16) | u64::from(self.archive)
     }
+}
+
+/// The refusal text for an archive identifier [`Loc::decode`] can't represent.
+pub(crate) fn unrepresentable(id: u64) -> String {
+    format!(
+        "archive identifier {id:#018x}: expected bits 48..56 (the patch flag) to be 0 or 1 and bits 56..64 to be 0"
+    )
 }
 
 /// A chunk row of a TOC: GUID (as stored in bundles: little endian) and its file, or removed.
@@ -278,9 +288,10 @@ fn read_body(data: &[u8]) -> Result<Toc> {
                 ));
             };
             let id = (u64::from(loc_high) << 32) | u64::from(loc_low);
+            let loc = Loc::decode(id).ok_or_else(|| bad(W, crate::at(cdo, w, 4), unrepresentable(id)))?;
             toc.chunks.push(TocChunk {
                 guid,
-                file: Some((Loc::decode(id), offset, size)),
+                file: Some((loc, offset, size)),
             });
         }
     }

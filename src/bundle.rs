@@ -67,7 +67,8 @@ pub fn read_region(r: &[u8]) -> Result<(Vec<FileRef>, Vec<u8>)> {
                 archive: u16::from(enc.to_le_bytes()[0]),
             });
         } else if flag != 0 {
-            cur = Some(Loc::decode(rd.u64be(pos)?));
+            let id = rd.u64be(pos)?;
+            cur = Some(Loc::decode(id).ok_or_else(|| bad(R, pos, crate::toc::unrepresentable(id)))?);
             pos = pos.saturating_add(8);
         }
         let loc = cur.ok_or_else(|| bad(R, pos, "first file has no archive identifier"))?;

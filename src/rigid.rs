@@ -22,16 +22,11 @@
 //! material's name lowercased. Each section is in the LOD's lists 0, 3 and 4 and has flags 0x0e, as the game's opaque
 //! shadow-casting sections (its decal sections are in list 2 alone with flags 0x0a, its shadow proxies in 3 and 4
 //! with flags 0x04). Every other byte is the value all 73 store.
-#![allow(
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-    clippy::cast_possible_truncation
-)] // lint-todo
 
 use half::f16;
 
 use crate::meshset::{self, Decl, Lod, MeshSet, Section, format, usage};
-use crate::{Result, bad, djb2, tangent};
+use crate::{Result, bad, djb2, tangent, u32_len};
 
 const W: &str = "rigid mesh";
 /// The section flags of an opaque, shadow-casting section.
@@ -65,32 +60,44 @@ pub struct Built {
 
 /// The declaration of the three streams.
 pub fn declaration() -> Decl {
-    let mut b = [0u8; meshset::DECL_SIZE];
     let elements = [
         (usage::POSITION, format::HALF4),
         (usage::TEXCOORD0, format::HALF2),
         (usage::TANGENT_SPACE, format::UBYTE4N),
     ];
-    for e in 0..16 {
-        b[4 * e..4 * e + 4].copy_from_slice(&match elements.get(e) {
-            Some(&(u, f)) => [u, f, 0, e as u8],
-            None => [0, 0, 0xff, 0],
-        });
+    let mut b = [0u8; meshset::DECL_SIZE];
+    // 16 element slots of 4 bytes (usage, format, offset, stream; an unused slot is 0, 0, 0xff, 0), then 16
+    // stream strides of 2 bytes, then the element and stream counts
+    for ((slot, element), stream) in b
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .take(16)
+        .zip(elements.map(Some).into_iter().chain(std::iter::repeat(None)))
+        .zip(0u8..)
+    {
+        let [usage, format, offset, slot_stream] = slot;
+        match element {
+            Some((u, f)) => (*usage, *format, *slot_stream) = (u, f, stream),
+            None => *offset = 0xff,
+        }
     }
-    for (j, &s) in STRIDES.iter().enumerate() {
-        b[64 + 2 * j] = s;
+    for (slot, &stride) in b.as_chunks_mut::<2>().0.iter_mut().skip(32).zip(&STRIDES) {
+        let [first, _] = slot;
+        *first = stride;
     }
-    b[96] = elements.len() as u8;
-    b[97] = STRIDES.len() as u8;
+    if let Some([ne, ns]) = b.get_mut(96..98) {
+        (*ne, *ns) = (3, 3);
+    }
     Decl {
         elements: elements
             .iter()
-            .enumerate()
-            .map(|(e, &(usage, format))| meshset::Element {
+            .zip(0u8..)
+            .map(|(&(usage, format), stream)| meshset::Element {
                 usage,
                 format,
                 offset: 0,
-                stream: e as u8,
+                stream,
             })
             .collect(),
         strides: STRIDES.to_vec(),
@@ -98,29 +105,41 @@ pub fn declaration() -> Decl {
     }
 }
 
-fn put(b: &mut [u8], at: usize, v: &[u8]) {
-    b[at..at + v.len()].copy_from_slice(v);
+/// Writes `v` at `at` of a record the builder sized itself.
+fn put(b: &mut [u8], at: usize, v: &[u8]) -> Result<()> {
+    let total = b.len();
+    at.checked_add(v.len())
+        .and_then(|end| b.get_mut(at..end))
+        .ok_or_else(|| {
+            bad(
+                W,
+                at,
+                format!("{} bytes past the end of a {total}-byte record", v.len()),
+            )
+        })?
+        .copy_from_slice(v);
+    Ok(())
 }
 
-fn f32s(b: &mut [u8], at: usize, v: &[f32]) {
+fn f32s(b: &mut [u8], at: usize, v: &[f32]) -> Result<()> {
     for (k, x) in v.iter().enumerate() {
-        put(b, at + 4 * k, &x.to_le_bytes());
+        put(b, crate::at(at, k, 4), &x.to_le_bytes())?;
     }
+    Ok(())
 }
 
 fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+    let [a0, a1, a2] = a;
+    let [b0, b1, b2] = b;
+    [a0 - b0, a1 - b1, a2 - b2]
 }
 
 /// The area of the triangle `p`.
 fn area(p: [[f64; 3]; 3]) -> f64 {
-    let (u, v) = (sub(p[1], p[0]), sub(p[2], p[0]));
-    let c = [
-        u[1] * v[2] - u[2] * v[1],
-        u[2] * v[0] - u[0] * v[2],
-        u[0] * v[1] - u[1] * v[0],
-    ];
-    0.5 * (c[0] * c[0] + c[1] * c[1] + c[2] * c[2]).sqrt()
+    let [p0, p1, p2] = p;
+    let ([u0, u1, u2], [v0, v1, v2]) = (sub(p1, p0), sub(p2, p0));
+    let c = [u1 * v2 - u2 * v1, u2 * v0 - u0 * v2, u0 * v1 - u1 * v0];
+    0.5 * c.iter().map(|x| x * x).sum::<f64>().sqrt()
 }
 
 /// What [`build`] measures of a part (the module documentation's measures).
@@ -134,34 +153,54 @@ pub struct Measures {
     pub uv_density: f32,
 }
 
-/// The part's bounds, surface area and UV0 density.
-pub fn measure(p: &Part) -> Measures {
+/// The part's bounds, surface area and UV0 density. Refused: a triangle whose index is past the part's vertices.
+pub fn measure(p: &Part) -> Result<Measures> {
     let (mut min, mut max) = ([f32::MAX; 3], [f32::MIN; 3]);
     for v in &p.positions {
-        for k in 0..3 {
-            min[k] = min[k].min(v[k]);
-            max[k] = max[k].max(v[k]);
+        for ((lo, hi), c) in min.iter_mut().zip(&mut max).zip(v) {
+            *lo = lo.min(*c);
+            *hi = hi.max(*c);
         }
     }
     let (mut total, mut density) = (0.0f64, Vec::with_capacity(p.triangles.len()));
-    for t in &p.triangles {
-        let a = area(t.map(|i| p.positions[i as usize].map(f64::from)));
+    for (k, t) in p.triangles.iter().enumerate() {
+        let vertex = |i: u32| -> Result<([f64; 3], [f64; 3])> {
+            let (pos, uv) = usize::try_from(i)
+                .ok()
+                .and_then(|i| p.positions.get(i).zip(p.uv.get(i)))
+                .ok_or_else(|| {
+                    bad(
+                        W,
+                        k,
+                        format!(
+                            "triangle {k}: index {i} past the {} vertices ({} UVs)",
+                            p.positions.len(),
+                            p.uv.len()
+                        ),
+                    )
+                })?;
+            Ok((pos.map(f64::from), [f64::from(uv[0]), f64::from(uv[1]), 0.0]))
+        };
+        let [(p0, t0), (p1, t1), (p2, t2)] = [vertex(t[0])?, vertex(t[1])?, vertex(t[2])?];
+        let a = area([p0, p1, p2]);
         total += a;
         if a > 0.0 {
-            let uv = area(t.map(|i| {
-                let w = p.uv[i as usize];
-                [f64::from(w[0]), f64::from(w[1]), 0.0]
-            }));
-            density.push((uv / a).sqrt());
+            density.push((area([t0, t1, t2]) / a).sqrt());
         }
     }
     density.sort_by(f64::total_cmp);
-    Measures {
+    Ok(Measures {
         min,
         max,
-        area: total as f32,
-        uv_density: density.get(density.len() / 2).copied().unwrap_or(1.0) as f32,
-    }
+        area: narrow(total),
+        uv_density: narrow(density.get(density.len() / 2).copied().unwrap_or(1.0)),
+    })
+}
+
+/// A measure as the `f32` the record stores.
+#[allow(clippy::cast_possible_truncation)] // rounds a computed measure to f32; no stored bytes are narrowed
+fn narrow(v: f64) -> f32 {
+    v as f32
 }
 
 /// The MeshSet named `name` (`<path>/<short name>`, as the game names them: `world/.../<x>_mesh`) of `parts`, its
@@ -180,7 +219,11 @@ pub fn build(name: &str, chunk: [u8; 16], parts: &[Part]) -> Result<Built> {
         if p.triangles.is_empty() || n == 0 {
             return refuse("no triangles".into());
         }
-        if let Some(t) = p.triangles.iter().find(|t| t.iter().any(|&x| x as usize >= n)) {
+        if let Some(t) = p
+            .triangles
+            .iter()
+            .find(|t| t.iter().any(|&x| usize::try_from(x).map_or(true, |x| x >= n)))
+        {
             return refuse(format!("triangle {t:?} past its {n} vertices"));
         }
         let finite = p.positions.iter().flatten().chain(p.normals.iter().flatten());
@@ -203,6 +246,7 @@ pub fn build(name: &str, chunk: [u8; 16], parts: &[Part]) -> Result<Built> {
     let decl = declaration();
     for (i, p) in parts.iter().enumerate() {
         let vertex_offset = u32::try_from(data.len()).map_err(|_| bad(W, i, "vertex buffer past 4 GiB"))?;
+        let (vertices, primitives) = (u32_len(W, p.positions.len())?, u32_len(W, p.triangles.len())?);
         for v in &p.positions {
             for c in [v[0], v[1], v[2], 1.0] {
                 data.extend(f16::from_f32(c).to_bits().to_le_bytes());
@@ -223,28 +267,25 @@ pub fn build(name: &str, chunk: [u8; 16], parts: &[Part]) -> Result<Built> {
             max: phi,
             area: surface,
             uv_density: density,
-        } = measure(p);
-        for k in 0..3 {
-            lo[k] = lo[k].min(plo[k]);
-            hi[k] = hi[k].max(phi[k]);
+        } = measure(p)?;
+        for ((lo, hi), (a, b)) in lo.iter_mut().zip(&mut hi).zip(plo.into_iter().zip(phi)) {
+            *lo = lo.min(a);
+            *hi = hi.max(b);
         }
         let mut record = vec![0u8; meshset::SECTION_SIZE];
-        put(&mut record, 0x1a, &[0x30]);
-        put(&mut record, 0x1c, &[p.slot, 0]);
-        record[0x1f] = 3;
-        put(&mut record, 0x48, &[0xff; 8]);
-        f32s(&mut record, 0x58, &[density, 1.0, 1.0, 1.0, 1.0, 1.0]);
+        put(&mut record, 0x1a, &[0x30])?;
+        put(&mut record, 0x1c, &[p.slot, 0])?;
+        put(&mut record, 0x1f, &[3])?;
+        put(&mut record, 0x48, &[0xff; 8])?;
+        f32s(&mut record, 0x58, &[density, 1.0, 1.0, 1.0, 1.0, 1.0])?;
         put(
             &mut record,
             0x144,
             &djb2(&p.material.to_lowercase()).to_le_bytes(),
-        );
-        f32s(&mut record, 0x14c, &[surface]);
-        f32s(
-            &mut record,
-            0x150,
-            &[plo[0], plo[1], plo[2], 0.0, phi[0], phi[1], phi[2], 0.0],
-        );
+        )?;
+        f32s(&mut record, 0x14c, &[surface])?;
+        let ([x0, y0, z0], [x1, y1, z1]) = (plo, phi);
+        f32s(&mut record, 0x150, &[x0, y0, z0, 0.0, x1, y1, z1, 0.0])?;
         sections.push(Section {
             record,
             name: p.material.clone(),
@@ -253,9 +294,9 @@ pub fn build(name: &str, chunk: [u8; 16], parts: &[Part]) -> Result<Built> {
             draw_decl: decl.clone(),
             flags: OPAQUE,
             stride: STRIDES.iter().sum(),
-            primitives: p.triangles.len() as u32,
+            primitives,
             vertex_offset,
-            vertices: p.positions.len() as u32,
+            vertices,
             ..Section::default()
         });
     }
@@ -266,31 +307,45 @@ pub fn build(name: &str, chunk: [u8; 16], parts: &[Part]) -> Result<Built> {
         s.start_index = first;
         for &i in p.triangles.iter().flatten() {
             match index_size {
-                2 => data.extend((i as u16).to_le_bytes()),
+                2 => data.extend(
+                    u16::try_from(i)
+                        .map_err(|_| bad(W, 0, format!("index {i} does not fit a 2-byte index")))?
+                        .to_le_bytes(),
+                ),
                 _ => data.extend(i.to_le_bytes()),
             }
         }
-        first += 3 * p.triangles.len() as u32;
+        let indices = p
+            .triangles
+            .len()
+            .checked_mul(3)
+            .and_then(|n| u32::try_from(n).ok());
+        first = indices
+            .and_then(|n| first.checked_add(n))
+            .ok_or_else(|| bad(W, 0, "index count past 32 bits"))?;
     }
     data.resize(crate::align(data.len(), 4), 0);
-    let index_bytes = data.len() as u32 - vertex_bytes;
+    let index_bytes = u32_len(W, data.len())?
+        .checked_sub(vertex_bytes)
+        .ok_or_else(|| bad(W, 0, "index bytes before the vertex bytes"))?;
     // the chunk ends 16-aligned
     data.resize(crate::align(data.len(), 16), 0);
-    let short_name = name.rfind('/').map_or(0, |i| i + 1);
+    let short_name = name.rfind('/').map_or(0, |i| i.saturating_add(1));
     let lod_name = format!("Mesh:{name}_lod0");
     let mut record = vec![0u8; meshset::LOD_PLAIN];
-    put(&mut record, 0x04, &[0xff, 0xff, 0, 0]);
+    put(&mut record, 0x04, &[0xff, 0xff, 0, 0])?;
     // the last (only) LOD
-    put(&mut record, 0x50, &[0x41]);
-    put(&mut record, 0x84, &[0xff; 8]);
-    put(&mut record, 0xa4, &djb2(&lod_name["Mesh:".len()..]).to_le_bytes());
-    let every: Vec<u8> = (0..parts.len() as u8).collect();
+    put(&mut record, 0x50, &[0x41])?;
+    put(&mut record, 0x84, &[0xff; 8])?;
+    put(&mut record, 0xa4, &djb2(&format!("{name}_lod0")).to_le_bytes())?;
+    let every: Vec<u8> =
+        (0..u8::try_from(parts.len()).map_err(|_| bad(W, 0, "more than 255 parts"))?).collect();
     let lod = Lod {
         record,
         name: lod_name,
         name_parts: [
             meshset::NamePart::At("Mesh:".len()),
-            meshset::NamePart::At("Mesh:".len() + short_name),
+            meshset::NamePart::At("Mesh:".len().saturating_add(short_name)),
         ],
         lists: [every.clone(), Vec::new(), Vec::new(), every.clone(), every],
         chunk,
@@ -306,20 +361,18 @@ pub fn build(name: &str, chunk: [u8; 16], parts: &[Part]) -> Result<Built> {
         (4, meshset::LOD_PLAIN),
         (8, meshset::SECTION_SIZE),
     ] {
-        put(&mut header, at, &(w as u32).to_le_bytes());
+        put(&mut header, at, &u32_len(W, w)?.to_le_bytes())?;
     }
-    f32s(
-        &mut header,
-        0x10,
-        &[lo[0], lo[1], lo[2], 0.0, hi[0], hi[1], hi[2], 0.0],
-    );
-    put(&mut header, 0x78, &djb2(name).to_le_bytes());
-    put(&mut header, 0x7c, &[0x00, 0x03, 0x00, 0xff]);
-    put(&mut header, 0x9c, &[0x00, 0x00, 0x01, 0x00, 0x01]);
-    put(&mut header, 0xa8, &[0x01, 0xff, 0xff, 0x80, 0x1e]);
-    put(&mut header, 0xb0, &[0x1f, 0x7f]);
+    let ([x0, y0, z0], [x1, y1, z1]) = (lo, hi);
+    f32s(&mut header, 0x10, &[x0, y0, z0, 0.0, x1, y1, z1, 0.0])?;
+    put(&mut header, 0x78, &djb2(name).to_le_bytes())?;
+    put(&mut header, 0x7c, &[0x00, 0x03, 0x00, 0xff])?;
+    put(&mut header, 0x9c, &[0x00, 0x00, 0x01, 0x00, 0x01])?;
+    put(&mut header, 0xa8, &[0x01, 0xff, 0xff, 0x80, 0x1e])?;
+    put(&mut header, 0xb0, &[0x1f, 0x7f])?;
     // sections in all, and LOD 0's first (0)
-    put(&mut header, 0xb6, &(parts.len() as u16).to_le_bytes());
+    let section_count = u16::try_from(parts.len()).map_err(|_| bad(W, 0, "more than 65535 sections"))?;
+    put(&mut header, 0xb6, &section_count.to_le_bytes())?;
     Ok(Built {
         meshset: MeshSet {
             header,

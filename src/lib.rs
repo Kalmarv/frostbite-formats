@@ -130,6 +130,21 @@ pub fn djb2(name: &str) -> u32 {
         .fold(5381u32, |h, b| h.wrapping_mul(33) ^ u32::from(b))
 }
 
+/// A GUID's text form (`8-4-4-4-12`) from its stored bytes (the first three groups little-endian): how a mod names a
+/// chunk entry by its GUID.
+pub fn guid_text(g: &[u8; 16]) -> String {
+    let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+    let rev = |r: std::ops::Range<usize>| hex(&g[r].iter().rev().copied().collect::<Vec<_>>());
+    format!(
+        "{}-{}-{}-{}-{}",
+        rev(0..4),
+        rev(4..6),
+        rev(6..8),
+        hex(&g[8..10]),
+        hex(&g[10..16])
+    )
+}
+
 /// Lowercase hexadecimal of `bytes`, in the order given.
 pub fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write;

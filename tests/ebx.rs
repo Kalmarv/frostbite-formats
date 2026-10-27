@@ -19,7 +19,9 @@
 
 mod inputs;
 
-use frostbite_formats::ebx::{self, Document, Pointer, Value, carry};
+use std::collections::HashMap;
+
+use frostbite_formats::ebx::{self, Document, Pointer, Value, carry, remap};
 
 const REFL: &[u8] = include_bytes!("fixtures/ebx/refl.ebx");
 const RFL2: &[u8] = include_bytes!("fixtures/ebx/rfl2.ebx");
@@ -427,4 +429,47 @@ fn real_documents_census() -> R {
         );
     }
     Ok(())
+}
+
+#[test]
+fn remap_gives_a_documents_identities_new_guids_and_they_survive_a_write() -> R {
+    let mut doc = ebx::read(REFL)?;
+    assert_eq!(
+        remap::defined(&doc),
+        vec![[0xA0; 16], [0xAB; 16], doc.instances[1].guid]
+    );
+    let map = HashMap::from([([0xA0; 16], [0xC0; 16]), ([0xAB; 16], [0xCD; 16])]);
+    assert!(remap::remap(&mut doc, &map) >= 2);
+    assert_eq!(doc.file_guid, [0xC0; 16]);
+    assert_eq!(doc.instances[0].guid, [0xCD; 16]);
+    let back = ebx::read(&ebx::write(&doc)?)?;
+    assert_eq!(back.file_guid, [0xC0; 16]);
+    assert_eq!(back.instances[0].guid, [0xCD; 16]);
+    // a map with none of the document's GUIDs changes nothing
+    let mut same = ebx::read(REFL)?;
+    assert_eq!(remap::remap(&mut same, &HashMap::from([([1; 16], [2; 16])])), 0);
+    assert_eq!(same, ebx::read(REFL)?);
+    Ok(())
+}
+
+#[test]
+fn remap_follows_an_import_reference() -> R {
+    let mut doc = ebx::read(RFL2)?;
+    let import = doc.imports[0].file_guid;
+    let map = HashMap::from([(import, [0x77; 16])]);
+    assert!(remap::remap(&mut doc, &map) >= 1);
+    assert_eq!(doc.imports[0].file_guid, [0x77; 16]);
+    assert_eq!(ebx::read(&ebx::write(&doc)?)?.imports[0].file_guid, [0x77; 16]);
+    Ok(())
+}
+
+#[test]
+fn a_guid_reads_as_text_with_its_first_three_groups_little_endian() {
+    let g = [
+        0x78, 0x56, 0x34, 0x12, 0xBC, 0x9A, 0xF0, 0xDE, 0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF,
+    ];
+    assert_eq!(
+        frostbite_formats::guid_text(&g),
+        "12345678-9abc-def0-0123-456789abcdef"
+    );
 }

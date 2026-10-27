@@ -1,6 +1,7 @@
 //! Frostbite EBX documents: RIFF `EBX\0`/`EBXS` files holding the EBXD payload, EFIX fixups, EBXX array and
 //! boxed-value records, and a REFL or RFL2 reflection table. [`read`] turns one into typed values, [`write()`] lays a
-//! document out again, and [`carry`] moves values (and what they point at) from one document into another.
+//! document out again, [`carry`] moves values (and what they point at) from one document into another, and [`remap`]
+//! gives a document's identities new GUIDs (a clone).
 //!
 //! This is a port of ReSkate's EBX reader, writer and merge (`Engine/Resource/ebx_document.cpp`,
 //! `ebx_writer.cpp` and `ebx_merge.cpp`; github.com/Dingo-Shenanigans/ReSkate, GPL-3.0-or-later), which is the
@@ -19,6 +20,7 @@
 pub mod carry;
 mod decode;
 mod encode;
+pub mod remap;
 
 pub use decode::{read, read_file_guid};
 pub use encode::write;

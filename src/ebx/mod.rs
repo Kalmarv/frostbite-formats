@@ -16,6 +16,10 @@
 //!
 //! A document read and written again keeps its values; the bytes come back exactly when the document already has the
 //! writer's layout (a document the writer produced, or one laid out the same way).
+#![allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
 
 pub mod carry;
 mod decode;

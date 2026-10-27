@@ -27,6 +27,18 @@ fn io(path: &Path) -> impl FnOnce(std::io::Error) -> Error + '_ {
     }
 }
 
+/// The file of manifest asset `index` among the assets that follow the `before` assets listed first, counting from
+/// `first` in a bundle's file table; an error when the table has no such file.
+fn file_entry(files: &[FileRef], first: usize, before: usize, index: usize) -> Result<FileRef> {
+    let at = first.saturating_add(before).saturating_add(index);
+    files.get(at).copied().ok_or_else(|| {
+        Error::Missing(format!(
+            "the bundle's file table has {} files, none at {at}",
+            files.len()
+        ))
+    })
+}
+
 /// A data folder opened for reading: its TOCs, its CAS archives and the install chunks that name them.
 #[derive(Debug)]
 pub struct Folder {
@@ -149,7 +161,7 @@ impl Folder {
             .archives
             .keys()
             .filter(|(d, _)| d == dir)
-            .map(|(_, n)| n + 1)
+            .map(|(_, n)| n.saturating_add(1))
             .max()
             .unwrap_or(1);
         let mut p = self.root.join("Win32");
@@ -168,14 +180,18 @@ impl Folder {
             .ok_or_else(|| Error::Missing(format!("{}: no archive for {loc:?}", self.root.display())))?;
         let mut f = fs::File::open(path).map_err(io(path))?;
         let len = f.metadata().map_err(io(path))?.len();
-        if u64::from(off) + u64::from(size) > len {
+        if u64::from(off).saturating_add(u64::from(size)) > len {
             return Err(Error::Missing(format!(
                 "{}: {size} bytes at {off} lie past the end ({len} bytes)",
                 path.display()
             )));
         }
         f.seek(SeekFrom::Start(u64::from(off))).map_err(io(path))?;
-        let mut buf = vec![0; size as usize];
+        let mut buf = vec![
+            0;
+            usize::try_from(size)
+                .map_err(|_| Error::Missing(format!("{size} bytes do not fit memory")))?
+        ];
         f.read_exact(&mut buf).map_err(io(path))?;
         Ok(buf)
     }
@@ -256,8 +272,14 @@ impl Source<'_> {
             let Some((m, first, _)) = self.manifest(&files, &inline)? else {
                 continue;
             };
-            if let Some(i) = m.ebx.iter().position(|e| e.name.eq_ignore_ascii_case(name)) {
-                let bytes = self.payload(files[first + i], m.ebx[i].size as usize)?;
+            if let Some((i, e)) = m
+                .ebx
+                .iter()
+                .enumerate()
+                .find(|(_, e)| e.name.eq_ignore_ascii_case(name))
+            {
+                let file = file_entry(&files, first, 0, i)?;
+                let bytes = self.payload(file, e.size as usize)?;
                 return Ok((bundle_name.clone(), crate::ebx::read(&bytes)?));
             }
         }
@@ -281,7 +303,7 @@ impl Source<'_> {
         for (i, e) in m.ebx.iter().enumerate() {
             let entry = EbxEntry {
                 name: e.name.clone(),
-                file: files[first + i],
+                file: file_entry(&files, first, 0, i)?,
                 size: e.size as usize,
             };
             let guid = crate::ebx::read_file_guid(&self.payload(entry.file, entry.size)?)?;
@@ -312,7 +334,7 @@ impl Source<'_> {
             name: a.name.clone(),
             rtype: a.rtype,
             meta: a.rmeta,
-            bytes: self.payload(files[first + m.ebx.len() + i], a.size as usize)?,
+            bytes: self.payload(file_entry(&files, first, m.ebx.len(), i)?, a.size as usize)?,
         })
     }
 

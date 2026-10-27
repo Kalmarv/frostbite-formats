@@ -3,6 +3,11 @@
 //! Layout (relocatable): u64 header, u64 0, then `count` entries (u64 key, u64 descriptor offset); the blocks' data;
 //! 16-aligned descriptors (u64 data offset, u64 block hash, u64 size); 16-aligned end; then the relocation list
 //! (u32 offsets, zero-terminated). The 16-byte resource metadata holds (size, relocation size, version, count).
+#![allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)] // lint-todo
 
 use crate::{Rd, Result, bad, capacity};
 

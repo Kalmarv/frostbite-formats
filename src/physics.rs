@@ -30,6 +30,11 @@
 //! (polygon faces, no edge data, no tree, zero bounds). The kind lives in the part, not the shape. Every fact here is
 //! read from ReSkate Studio 20261012's writer (`reskate_cli`, unpacked: FUN_140160250, FUN_14015c790 and the functions
 //! named below) and checked against Studio's output and the game's own resources (`tests/physics.rs`).
+#![allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)] // lint-todo
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 

@@ -53,7 +53,7 @@ fn meshsets(only: &[&str]) -> R<Option<Vec<Stored>>> {
                 if a.rtype != MESHSET {
                     continue;
                 }
-                let e = b.resource(i);
+                let e = b.resource(i).expect("resource index of the manifest");
                 let (loc, at, _) = e.file;
                 if seen.insert((loc.patch, loc.chunk, loc.archive, at)) {
                     out.push((e.name, src.payload(e.file, e.size as usize)?, a.rmeta));

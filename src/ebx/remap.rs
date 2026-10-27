@@ -4,6 +4,11 @@
 //! it: the file GUID, instance GUIDs, import references, GUID values, and the bytes the document carries as read
 //! (instance images, boxed values, the payload), so a GUID inside a value the reader does not decode follows too.
 //! GUIDs outside the map (type GUIDs, references to other documents) stay.
+#![allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)] // lint-todo
 use std::collections::HashMap;
 
 use super::{Document, Value};

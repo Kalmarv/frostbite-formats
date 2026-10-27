@@ -46,7 +46,7 @@ pub struct Element {
 impl Element {
     /// The DXGI format number the element's data is read as.
     pub fn dxgi(&self) -> u8 {
-        (self.format >> 8) as u8
+        self.format.to_le_bytes()[1]
     }
 }
 
@@ -99,12 +99,14 @@ impl InputLayout {
     /// ([`Found::ByElimination`]: a program reads a position as `TEXCOORD0`, or usage 30 as a `TEXCOORD`). `None`: no
     /// element, or several left.
     pub fn resolve(&self, inputs: &[(&str, u32)]) -> Vec<Option<Found>> {
-        let of_index =
-            |index: u32| (0..self.elements.len()).filter(move |&i| self.elements[i].first == index);
+        let of_index = |index: u32| {
+            (self.elements.iter().enumerate()).filter_map(move |(i, e)| (e.first == index).then_some(i))
+        };
+        let usage_name = |i: usize| self.usages.get(i).map(|&u| semantic_name(u));
         let mut found: Vec<Option<Found>> = inputs
             .iter()
             .map(|&(name, index)| {
-                let mut named = of_index(index).filter(|&i| semantic_name(self.usages[i]) == name);
+                let mut named = of_index(index).filter(|&i| usage_name(i) == Some(name));
                 let one = named.next()?;
                 named.next().is_none().then_some(Found::ByName(one))
             })
@@ -116,11 +118,11 @@ impl InputLayout {
                 None => None,
             })
             .collect();
-        for (k, &(_, index)) in inputs.iter().enumerate() {
-            if found[k].is_none() {
+        for (slot, &(_, index)) in found.iter_mut().zip(inputs) {
+            if slot.is_none() {
                 let mut left = of_index(index).filter(|i| !taken.contains(i));
                 if let (Some(one), None) = (left.next(), left.next()) {
-                    found[k] = Some(Found::ByElimination(one));
+                    *slot = Some(Found::ByElimination(one));
                     taken.push(one);
                 }
             }
@@ -147,7 +149,7 @@ pub fn read(d: &[u8], meta: &[u8; 16]) -> Result<InputLayout> {
     if n == 0 || n > 32 {
         return Err(bad(W, 0, format!("{n} elements")));
     }
-    let usages_at = HEADER + (ELEMENT * n).next_multiple_of(16);
+    let usages_at = HEADER.saturating_add(ELEMENT.saturating_mul(n).next_multiple_of(16));
     if r.u64le(4)? != HEADER as u64
         || r.u64le(0xc)? != usages_at as u64
         || r.bytes(0x14, 12)?.iter().any(|&b| b != 0)
@@ -158,10 +160,10 @@ pub fn read(d: &[u8], meta: &[u8; 16]) -> Result<InputLayout> {
             "pointers are not the elements at 0x20 and the usages after them",
         ));
     }
-    if size != usages_at + n.next_multiple_of(16)
+    if size != usages_at.saturating_add(n.next_multiple_of(16))
         || reloc != 8
         || r.u32le(size)? != 4
-        || r.u32le(size + 4)? != 0xc
+        || r.u32le(crate::at(size, 1, 4))? != 0xc
     {
         return Err(bad(
             W,
@@ -171,12 +173,12 @@ pub fn read(d: &[u8], meta: &[u8; 16]) -> Result<InputLayout> {
     }
     let elements = (0..n)
         .map(|i| {
-            let at = HEADER + ELEMENT * i;
+            let at = crate::at(HEADER, i, ELEMENT);
             Ok(Element {
                 first: r.u32le(at)?,
-                last: r.u32le(at + 4)?,
-                words: [r.u32le(at + 8)?, r.u32le(at + 12)?],
-                format: r.u32le(at + 16)?,
+                last: r.u32le(crate::at(at, 1, 4))?,
+                words: [r.u32le(crate::at(at, 2, 4))?, r.u32le(crate::at(at, 3, 4))?],
+                format: r.u32le(crate::at(at, 4, 4))?,
             })
         })
         .collect::<Result<Vec<_>>>()?;

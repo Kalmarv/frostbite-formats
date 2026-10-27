@@ -2,6 +2,11 @@
 //! and the chunk table, each found through a perfect hash over its keys (lowercase bundle names, chunk GUIDs).
 //! Base-game TOCs store names Huffman-coded (flag 4); Patch TOCs (the ones in a folder of added or replaced files,
 //! as ReSkate Studio writes it beside the game's `Data`) store them as plain strings, which is what [`write()`] writes.
+#![allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)] // lint-todo
 
 use crate::{Error, Rd, Result, align, bad, latin1};
 

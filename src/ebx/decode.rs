@@ -1,4 +1,9 @@
 //! Decoding an EBX document from its bytes (ReSkate `ebx_document.cpp`, `read_document`).
+#![allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)] // lint-todo
 use std::collections::BTreeMap;
 
 use super::{

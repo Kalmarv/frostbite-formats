@@ -22,6 +22,11 @@
 //! material's name lowercased. Each section is in the LOD's lists 0, 3 and 4 and has flags 0x0e, as the game's opaque
 //! shadow-casting sections (its decal sections are in list 2 alone with flags 0x0a, its shadow proxies in 3 and 4
 //! with flags 0x04). Every other byte is the value all 73 store.
+#![allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)] // lint-todo
 
 use half::f16;
 

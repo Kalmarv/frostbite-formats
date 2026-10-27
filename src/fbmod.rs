@@ -189,12 +189,12 @@ impl<'a> Cur<'a> {
     fn string(&mut self) -> Result<String> {
         let at = self.position();
         let rest = self.c.bytes().get(at..).unwrap_or_default();
-        let end = rest
-            .iter()
-            .position(|&b| b == 0)
-            .ok_or_else(|| bad(W, at, "unterminated string"))?;
-        let s = std::str::from_utf8(&rest[..end]).map_err(|_| bad(W, at, "string is not UTF-8"))?;
-        self.take(end + 1)?;
+        let mut parts = rest.splitn(2, |&b| b == 0);
+        let (Some(text), Some(_)) = (parts.next(), parts.next()) else {
+            return Err(bad(W, at, "unterminated string, expected a zero byte"));
+        };
+        let s = std::str::from_utf8(text).map_err(|_| bad(W, at, "string is not UTF-8"))?;
+        self.take(text.len().saturating_add(1))?;
         Ok(s.to_owned())
     }
     fn u32s(&mut self) -> Result<Vec<u32>> {
@@ -339,13 +339,16 @@ pub fn read(bytes: &[u8]) -> Result<Fbmod> {
         return Err(bad(
             W,
             c.position(),
-            format!("{} bytes after the last payload", bytes.len() - c.position()),
+            format!(
+                "{} bytes after the last payload, expected the file to end there",
+                bytes.len().saturating_sub(c.position())
+            ),
         ));
     }
     let mut out = Vec::with_capacity(entries.len());
     for (entry, sha, at) in entries {
         if let (Some(s), Some(sha)) = (&entry.stored, sha)
-            && sha1(&payloads[s.index]) != sha
+            && payloads.get(s.index).map(|p| sha1(p)) != Some(sha)
         {
             return Err(bad(
                 W,
@@ -470,12 +473,14 @@ pub fn write(m: &Fbmod) -> Result<Vec<u8>> {
     for p in &m.payloads {
         o.0.extend(offset.to_le_bytes());
         o.0.extend((p.len() as u64).to_le_bytes());
-        offset += p.len() as u64;
+        offset = offset.saturating_add(p.len() as u64);
     }
     for p in &m.payloads {
         o.0.extend(p);
     }
-    o.0[12..20].copy_from_slice(&table_at.to_le_bytes());
+    if let Some(slot) = o.0.get_mut(12..20) {
+        slot.copy_from_slice(&table_at.to_le_bytes());
+    }
     Ok(o.0)
 }
 
@@ -488,7 +493,7 @@ impl Fbmod {
             return Ok(i);
         }
         self.payloads.push(encoded);
-        Ok(self.payloads.len() - 1)
+        Ok(self.payloads.len().saturating_sub(1))
     }
 
     /// Remove the payloads no entry points at (what an entry given a new payload leaves behind), keeping the others in
@@ -501,10 +506,10 @@ impl Fbmod {
             }
         }
         let mut renumbered = Vec::with_capacity(used.len());
-        let mut next = 0;
+        let mut next = 0usize;
         for &u in &used {
             renumbered.push(next);
-            next += usize::from(u);
+            next = next.saturating_add(usize::from(u));
         }
         let mut keep = used.iter();
         self.payloads.retain(|_| keep.next().copied().unwrap_or(false));
@@ -513,7 +518,7 @@ impl Fbmod {
                 s.index = n;
             }
         }
-        used.len() - next
+        used.len().saturating_sub(next)
     }
 }
 

@@ -1,6 +1,11 @@
 //! Frostbite CAS: a sequence of blocks, each an eight-byte header and an exactly sized payload ([`blocks`]), and the
 //! codec that decodes a stream of them to its bytes ([`Cas`]), the Oodle blocks through the caller's handle to the
 //! game's library.
+#![allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)] // lint-todo
 use primase_foundations::compress::{Compressor, Decompressor, Error, Result, Zlib, oodle::Oodle};
 
 pub(crate) fn invalid(offset: usize, detail: impl ToString) -> Error {

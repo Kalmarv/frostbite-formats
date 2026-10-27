@@ -20,6 +20,11 @@
 //! one-LOD Quick Drop meshes give back 22,085 of their 23,704 stored frames byte for byte and the rest as the same
 //! frame: an angle on the edge of a quadrant (step 255, or the next quadrant's 0) or a normal between two axes has
 //! two encodings ([`tests/rigid.rs`](https://github.com/Kalmarv/primase/tree/main/worlds/frostbite/tests/rigid.rs)).
+#![allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)] // lint-todo
 
 use crate::meshset;
 

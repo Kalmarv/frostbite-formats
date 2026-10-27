@@ -1,6 +1,11 @@
 //! The shader lookup tables of `dingolevel_root`: material key -> program indices (program lookup, type 0xE2E6955B,
 //! after the program records) and material key -> streamable texture set (type 0x2D254A89). Rows are a map: the first
 //! row of a repeated key wins, as the game's reader appends.
+#![allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)] // lint-todo
 
 use std::collections::BTreeMap;
 

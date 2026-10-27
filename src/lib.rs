@@ -58,6 +58,15 @@
 //! # }
 //! ```
 #![deny(clippy::disallowed_methods, clippy::disallowed_types)]
+// Stored bytes never panic a reader: no unchecked index, slice, arithmetic or narrowing cast in library code.
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::cast_possible_truncation
+    )
+)]
 
 use primase_foundations::bytes::Endian;
 
@@ -132,27 +141,22 @@ pub fn djb2(name: &str) -> u32 {
 /// A GUID's text form (`8-4-4-4-12`) from its stored bytes (the first three groups little-endian): how a mod names a
 /// chunk entry by its GUID.
 pub fn guid_text(g: &[u8; 16]) -> String {
-    let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
-    let rev = |r: std::ops::Range<usize>| hex(&g[r].iter().rev().copied().collect::<Vec<_>>());
+    let [a0, a1, a2, a3, b0, b1, c0, c1, d0, d1, e0, e1, e2, e3, e4, e5] = *g;
     format!(
-        "{}-{}-{}-{}-{}",
-        rev(0..4),
-        rev(4..6),
-        rev(6..8),
-        hex(&g[8..10]),
-        hex(&g[10..16])
+        "{a3:02x}{a2:02x}{a1:02x}{a0:02x}-{b1:02x}{b0:02x}-{c1:02x}{c0:02x}-{d0:02x}{d1:02x}-{e0:02x}{e1:02x}{e2:02x}{e3:02x}{e4:02x}{e5:02x}"
     )
 }
 
 /// Lowercase hexadecimal of `bytes`, in the order given.
 pub fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write;
-    bytes
-        .iter()
-        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
+    bytes.iter().fold(
+        String::with_capacity(bytes.len().saturating_mul(2)),
+        |mut s, b| {
             let _ = write!(s, "{b:02x}");
             s
-        })
+        },
+    )
 }
 
 /// A format error: what was being read, where, and what broke.
@@ -276,11 +280,11 @@ impl<'a> Rd<'a> {
             .data
             .get(at..)
             .ok_or_else(|| bad(self.what, at, "string past the end"))?;
-        let end = rest
-            .iter()
-            .position(|&b| b == 0)
-            .ok_or_else(|| bad(self.what, at, "unterminated string"))?;
-        Ok(rest[..end].iter().map(|&b| char::from(b)).collect())
+        let mut parts = rest.splitn(2, |&b| b == 0);
+        match (parts.next(), parts.next()) {
+            (Some(text), Some(_)) => Ok(text.iter().map(|&b| char::from(b)).collect()),
+            _ => Err(bad(self.what, at, "unterminated string, expected a zero byte")),
+        }
     }
 }
 
@@ -304,9 +308,15 @@ pub fn capacity(what: &'static str, count: usize, min_bytes: usize, remaining: u
     }
 }
 
+/// The offset of record `index` of a table at `base` whose records take `stride` bytes. Saturating: an offset past the
+/// address space is past any data, and the read that uses it is refused.
+pub fn at(base: usize, index: usize, stride: usize) -> usize {
+    base.saturating_add(index.saturating_mul(stride))
+}
+
 /// `v` rounded up to a multiple of `a`.
 pub fn align(v: usize, a: usize) -> usize {
-    v.div_ceil(a) * a
+    v.div_ceil(a).saturating_mul(a)
 }
 
 #[cfg(test)]

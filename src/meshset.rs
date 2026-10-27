@@ -37,6 +37,11 @@
 //! then the header's LOD records, names, bone ids and bounds), 16-aligned; the trailing data.
 //!
 //! A section's stored streams lie one after another from its vertex offset, each `stride * vertex count` bytes.
+#![allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)] // lint-todo
 
 use crate::{Rd, Result, bad, capacity};
 

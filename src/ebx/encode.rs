@@ -1,6 +1,11 @@
 //! Encoding an EBX document to bytes (ReSkate `ebx_writer.cpp`): instances laid out again from their values
 //! (padding and unread bytes from each instance's image as read), then arrays, boxed values (carried as bytes, with
 //! the arrays and strings they point at), strings (deduplicated, in first-use order) and the fixup tables.
+#![allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)] // lint-todo
 use std::collections::BTreeMap;
 
 use super::decode::align_up;

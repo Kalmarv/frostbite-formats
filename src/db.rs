@@ -31,8 +31,10 @@ impl Node {
     }
     /// The value of a 32-bit integer node (type 8), `None` for any other node.
     pub fn u32(&self) -> Option<u32> {
-        (self.ty == 8 && self.payload.len() == 4)
-            .then(|| u32::from_le_bytes([self.payload[0], self.payload[1], self.payload[2], self.payload[3]]))
+        match (self.ty, self.payload.as_slice()) {
+            (8, &[a, b, c, d]) => Some(u32::from_le_bytes([a, b, c, d])),
+            _ => None,
+        }
     }
 }
 
@@ -51,15 +53,15 @@ fn varint(r: &Rd, mut pos: usize) -> Result<(usize, usize)> {
     let (mut v, mut shift) = (0usize, 0u32);
     loop {
         let b = r.u8(pos)?;
-        pos += 1;
+        pos = pos.saturating_add(1);
         if shift > 56 {
-            return Err(bad(W, pos, "varint too long"));
+            return Err(bad(W, pos, "varint too long: expected at most 9 bytes"));
         }
         v |= usize::from(b & 127) << shift;
         if b & 128 == 0 {
             return Ok((v, pos));
         }
-        shift += 7;
+        shift = shift.saturating_add(7);
     }
 }
 
@@ -75,7 +77,7 @@ pub fn read_node(data: &[u8], pos: usize) -> Result<(Node, usize)> {
 fn read_at(data: &[u8], pos: usize, depth: usize) -> Result<(Node, usize)> {
     let r = Rd::new(data, W);
     let tag = r.u8(pos)?;
-    let mut pos = pos + 1;
+    let mut pos = pos.saturating_add(1);
     let mut n = Node {
         ty: tag & 31,
         ..Node::default()
@@ -87,7 +89,7 @@ fn read_at(data: &[u8], pos: usize, depth: usize) -> Result<(Node, usize)> {
     if n.named {
         n.name = r.cstr(pos)?;
         // one byte a character (Latin-1): the bytes read, not the UTF-8 length of the String they became
-        pos += n.name.chars().count() + 1;
+        pos = pos.saturating_add(n.name.chars().count()).saturating_add(1);
     }
     match n.ty {
         1 | 2 => {
@@ -99,10 +101,10 @@ fn read_at(data: &[u8], pos: usize, depth: usize) -> Result<(Node, usize)> {
                 ));
             }
             let (size, p) = varint(&r, pos)?;
-            let end = p + size;
+            let end = p.saturating_add(size);
             pos = p;
             while pos < end {
-                let (child, p) = read_at(data, pos, depth + 1)?;
+                let (child, p) = read_at(data, pos, depth.saturating_add(1))?;
                 pos = p;
                 if child.ty == 0 {
                     n.terminated = true;
@@ -117,12 +119,12 @@ fn read_at(data: &[u8], pos: usize, depth: usize) -> Result<(Node, usize)> {
         7 | 19 => {
             let (size, p) = varint(&r, pos)?;
             n.payload = r.bytes(p, size)?.to_vec();
-            pos = p + size;
+            pos = p.saturating_add(size);
         }
         t => {
             let size = fixed_size(t).ok_or_else(|| bad(W, pos, format!("unsupported value type {t}")))?;
             n.payload = r.bytes(pos, size)?.to_vec();
-            pos += size;
+            pos = pos.saturating_add(size);
         }
     }
     Ok((n, pos))
@@ -130,7 +132,7 @@ fn read_at(data: &[u8], pos: usize, depth: usize) -> Result<(Node, usize)> {
 
 fn put_varint(out: &mut Vec<u8>, mut v: usize) {
     loop {
-        let b = (v & 127) as u8;
+        let b = u8::try_from(v & 127).unwrap_or(0);
         v >>= 7;
         if v == 0 {
             out.push(b);
@@ -184,11 +186,21 @@ pub fn write_node(n: &Node, out: &mut Vec<u8>) -> Result<()> {
 
 /// A DB file behind the TOC envelope: (envelope bytes, root, trailing bytes).
 pub fn read_file(data: &[u8]) -> Result<(Vec<u8>, Node, Vec<u8>)> {
-    if data.len() <= ENVELOPE || data[..4] != MAGIC {
-        return Err(bad(W, 0, "unrecognised envelope"));
-    }
+    let (envelope, body) = data
+        .split_at_checked(ENVELOPE)
+        .filter(|(envelope, body)| !body.is_empty() && envelope.starts_with(&MAGIC))
+        .ok_or_else(|| {
+            bad(
+                W,
+                0,
+                format!(
+                    "unrecognised envelope: expected the magic {MAGIC:02x?} and more than {ENVELOPE} bytes"
+                ),
+            )
+        })?;
     let (root, pos) = read_node(data, ENVELOPE)?;
-    Ok((data[..ENVELOPE].to_vec(), root, data[pos..].to_vec()))
+    let trailer = body.get(pos.saturating_sub(ENVELOPE)..).unwrap_or_default();
+    Ok((envelope.to_vec(), root, trailer.to_vec()))
 }
 
 /// A DB file: `envelope`, the tree and `trailer`, the counterpart of [`read_file`].

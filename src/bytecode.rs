@@ -6,7 +6,7 @@
 //! container and after each container are kept as stored. A container is found by its magic and delimited by its own
 //! size field; a magic that is not a container is an error, not skipped.
 
-use crate::{Error, Result, bad};
+use crate::{Error, Rd, Result, bad};
 
 const W: &str = "compiled bytecode";
 /// The resource type id of a CompiledBytecode resource.
@@ -24,17 +24,22 @@ pub struct Span {
 
 /// The payload's tag at [`TAG_AT`], if it has one.
 pub fn tag(payload: &[u8]) -> Option<[u8; 4]> {
-    payload.get(TAG_AT..TAG_AT + 4)?.try_into().ok()
+    payload.get(TAG_AT..)?.first_chunk().copied()
 }
 
 /// A container header at `at`: the magic, version 1.0, a size that holds the part directory and lies within the
 /// payload, and a directory of parts that lie within the container. `Ok(size)` when it is one.
 fn header(payload: &[u8], at: usize) -> Result<usize> {
+    let r = Rd::new(payload, W);
     let word = |o: usize| -> Result<usize> {
-        let b = payload
-            .get(at + o..at + o + 4)
-            .ok_or_else(|| bad(W, at + o, "a container header past the end"))?;
-        Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize)
+        let w = r.u32le(at.saturating_add(o)).map_err(|_| {
+            bad(
+                W,
+                at.saturating_add(o),
+                "a container header past the end: expected a 32-bit word",
+            )
+        })?;
+        usize::try_from(w).map_err(|_| bad(W, at.saturating_add(o), "word does not fit the address space"))
     };
     if word(20)? != 1 {
         return Err(bad(W, at, format!("version {:#x}, not 1", word(20)?)));
@@ -48,9 +53,10 @@ fn header(payload: &[u8], at: usize) -> Result<usize> {
             format!("size {size} with {n} parts in a payload of {}", payload.len()),
         ));
     }
+    let directory_end = directory.unwrap_or(usize::MAX);
     for i in 0..n {
-        let part = word(32 + 4 * i)?;
-        if part < 32 + 4 * n || part + 8 > size {
+        let part = word(crate::at(32, i, 4))?;
+        if part < directory_end || part.saturating_add(8) > size {
             return Err(bad(W, at, format!("part {i} at {part} in a container of {size}")));
         }
     }
@@ -61,11 +67,14 @@ fn header(payload: &[u8], at: usize) -> Result<usize> {
 /// container that does not head one is an error naming its offset, and so is a payload with none.
 pub fn containers(payload: &[u8]) -> Result<Vec<Span>> {
     let (mut out, mut from) = (Vec::new(), 0);
-    while let Some(p) = payload[from..].windows(4).position(|w| w == MAGIC) {
-        let offset = from + p;
+    while let Some(p) = payload
+        .get(from..)
+        .and_then(|rest| rest.windows(4).position(|w| w == MAGIC))
+    {
+        let offset = from.saturating_add(p);
         let size = header(payload, offset)?;
         out.push(Span { offset, size });
-        from = offset + size;
+        from = offset.saturating_add(size);
     }
     if out.is_empty() {
         return Err(Error::Unsupported(format!(

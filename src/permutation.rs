@@ -13,6 +13,11 @@
 //! other resources of the family carry in their names and metadata ([`resource_id`]). The raster permutations seen
 //! hold a vertex and a pixel program, or a vertex program alone; a compute permutation one program. The word at 0x18
 //! of a raster permutation is kept as stored (it is 0 in every one seen).
+#![allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)] // lint-todo
 
 use crate::{Rd, Result, bad};
 

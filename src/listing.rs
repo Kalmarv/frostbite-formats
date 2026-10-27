@@ -59,9 +59,22 @@ impl Listing {
 }
 
 impl Bundle {
-    fn listed(&self, kind: Kind, index: usize, a: &Asset, file_index: usize) -> Listed {
+    /// Where the file of entry `index` of `kind` lies in `files`: the manifest lists its assets in file order (the
+    /// EBX documents, then the resources, then the chunks), from `first`.
+    fn file_index(&self, kind: Kind, index: usize) -> usize {
+        let m = &self.manifest;
+        let before = match kind {
+            Kind::Ebx => 0,
+            Kind::Res => m.ebx.len(),
+            Kind::Chunk => m.ebx.len().saturating_add(m.res.len()),
+        };
+        self.first.saturating_add(before).saturating_add(index)
+    }
+
+    /// Entry `index` of `kind` from its manifest row `a`; `None` when the bundle's file table has no file for it.
+    fn listed(&self, kind: Kind, index: usize, a: &Asset) -> Option<Listed> {
         let res = kind == Kind::Res;
-        Listed {
+        Some(Listed {
             toc: self.toc_path.clone(),
             bundle: self.name.clone(),
             kind,
@@ -73,31 +86,27 @@ impl Bundle {
             resource_type: res.then_some(a.rtype),
             resource_id: res.then_some(a.rid),
             size: if kind == Kind::Chunk { a.lsize } else { a.size },
-            file: self.files[file_index],
-        }
+            file: *self.files.get(self.file_index(kind, index))?,
+        })
     }
 
     /// Every entry: the EBX documents, then the resources, then the chunks, each in manifest order.
     pub fn entries(&self) -> impl Iterator<Item = Listed> + '_ {
         let m = &self.manifest;
-        let base = self.first;
-        let ebx = (m.ebx.iter().enumerate()).map(move |(i, a)| self.listed(Kind::Ebx, i, a, base + i));
-        let res = (m.res.iter().enumerate())
-            .map(move |(i, a)| self.listed(Kind::Res, i, a, base + m.ebx.len() + i));
-        let chunks = (m.chunks.iter().enumerate())
-            .map(move |(i, a)| self.listed(Kind::Chunk, i, a, base + m.ebx.len() + m.res.len() + i));
+        let ebx = (m.ebx.iter().enumerate()).filter_map(move |(i, a)| self.listed(Kind::Ebx, i, a));
+        let res = (m.res.iter().enumerate()).filter_map(move |(i, a)| self.listed(Kind::Res, i, a));
+        let chunks = (m.chunks.iter().enumerate()).filter_map(move |(i, a)| self.listed(Kind::Chunk, i, a));
         ebx.chain(res).chain(chunks)
     }
 
-    /// EBX document `i` of the manifest, as an entry.
-    pub fn ebx(&self, i: usize) -> Listed {
-        self.listed(Kind::Ebx, i, &self.manifest.ebx[i], self.first + i)
+    /// EBX document `i` of the manifest, as an entry; `None` when the manifest has no document `i`.
+    pub fn ebx(&self, i: usize) -> Option<Listed> {
+        self.listed(Kind::Ebx, i, self.manifest.ebx.get(i)?)
     }
 
-    /// Resource `i` of the manifest, as an entry.
-    pub fn resource(&self, i: usize) -> Listed {
-        let m = &self.manifest;
-        self.listed(Kind::Res, i, &m.res[i], self.first + m.ebx.len() + i)
+    /// Resource `i` of the manifest, as an entry; `None` when the manifest has no resource `i`.
+    pub fn resource(&self, i: usize) -> Option<Listed> {
+        self.listed(Kind::Res, i, self.manifest.res.get(i)?)
     }
 
     /// The chunk with GUID `guid` in this bundle's TOC chunk table: its bytes' place and decoded size (the whole chunk:
@@ -111,18 +120,28 @@ impl Bundle {
             file.ok_or_else(|| Error::Missing(format!("{}: chunk {} is removed", self.name, hex(guid))))?;
         let raw = src.raw(file)?;
         let blocks = crate::cas::blocks(&raw)?;
-        Ok(Some((file, blocks.iter().map(|b| b.decoded_size).sum())))
+        Ok(Some((
+            file,
+            blocks
+                .iter()
+                .map(|b| b.decoded_size)
+                .fold(0usize, usize::saturating_add),
+        )))
     }
 
     /// The chunk with GUID `guid` (as stored): its bytes' place and decoded size, from this bundle or else from the
     /// TOC's chunk table (content copied from the base game lies there).
     pub fn chunk(&self, src: &Source<'_>, guid: &[u8; 16]) -> Result<(FileRef, usize)> {
         let m = &self.manifest;
-        if let Some(i) = m.chunks.iter().position(|c| &c.guid == guid) {
-            return Ok((
-                self.files[self.first + m.ebx.len() + m.res.len() + i],
-                m.chunks[i].lsize as usize,
-            ));
+        if let Some((i, c)) = m.chunks.iter().enumerate().find(|(_, c)| &c.guid == guid) {
+            let file = self.files.get(self.file_index(Kind::Chunk, i)).ok_or_else(|| {
+                Error::Missing(format!(
+                    "{}: chunk {} has no file in the bundle's file table",
+                    self.name,
+                    hex(guid)
+                ))
+            })?;
+            return Ok((*file, c.lsize as usize));
         }
         let TocChunk { file, .. } = self.toc.chunks.iter().find(|c| &c.guid == guid).ok_or_else(|| {
             Error::Missing(format!(
@@ -135,7 +154,13 @@ impl Bundle {
             file.ok_or_else(|| Error::Missing(format!("{}: chunk {} is removed", self.name, hex(guid))))?;
         let raw = src.raw(file)?;
         let blocks = crate::cas::blocks(&raw)?;
-        Ok((file, blocks.iter().map(|b| b.decoded_size).sum()))
+        Ok((
+            file,
+            blocks
+                .iter()
+                .map(|b| b.decoded_size)
+                .fold(0usize, usize::saturating_add),
+        ))
     }
 }
 

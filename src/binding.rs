@@ -26,6 +26,11 @@
 //! bytes times four; the group's size field is the buffer's size rounded up to 16. For a resource group the first
 //! field is the resource's index and the kind a code kept as stored. Everything is kept as stored; the reader walks to
 //! the exact end of the blob and refuses what does not fit.
+#![allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)] // lint-todo
 
 use crate::{Rd, Result, bad, capacity};
 

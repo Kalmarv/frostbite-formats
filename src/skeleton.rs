@@ -94,7 +94,10 @@ pub fn read(doc: &Document) -> Result<Option<(String, Vec<SkeletonJoint>)>> {
         )?;
         match at {
             -1 => Ok(None),
-            0.. if (at as usize) < count => Ok(Some(at as u32)),
+            0.. => match u32::try_from(at) {
+                Ok(joint_at) if usize::try_from(at).is_ok_and(|a| a < count) => Ok(Some(joint_at)),
+                _ => Err(bad(format!("joint {joint}: {field} {at} of {count} joints"))),
+            },
             _ => Err(bad(format!("joint {joint}: {field} {at} of {count} joints"))),
         }
     };
@@ -109,11 +112,16 @@ pub fn read(doc: &Document) -> Result<Option<(String, Vec<SkeletonJoint>)>> {
             "Name",
         )?)
         .map_err(|_| bad(format!("joint {i}: name offset")))?;
-        let end = table
-            .get(at..)
-            .and_then(|t| t.iter().position(|&b| b == 0))
-            .ok_or_else(|| bad(format!("joint {i}: name at {at} of a table of {}", table.len())))?;
-        let joint_name = String::from_utf8_lossy(&table[at..at + end]).into_owned();
+        let mut parts = table.get(at..).unwrap_or_default().splitn(2, |&b| b == 0);
+        let joint_name = match (parts.next(), parts.next()) {
+            (Some(name), Some(_)) => String::from_utf8_lossy(name).into_owned(),
+            _ => {
+                return Err(bad(format!(
+                    "joint {i}: no zero-terminated name at {at} of a table of {}",
+                    table.len()
+                )));
+            }
+        };
         let hash = u32::try_from(int(
             o.field("NameHash")
                 .ok_or_else(|| bad(format!("joint {i}: no NameHash")))?,
@@ -145,11 +153,11 @@ pub fn read(doc: &Document) -> Result<Option<(String, Vec<SkeletonJoint>)>> {
 /// No cycle through the parents, and every parent a joint of the skeleton. The error's offset is the index of the joint
 /// whose parents fail (the joints are values, not bytes).
 pub fn verify_hierarchy(joints: &[SkeletonJoint]) -> Result<()> {
-    for (i, _) in joints.iter().enumerate() {
-        let mut at = joints[i].parent;
+    for (i, joint) in joints.iter().enumerate() {
+        let mut at = joint.parent;
         let mut steps = 0usize;
         while let Some(p) = at {
-            steps += 1;
+            steps = steps.saturating_add(1);
             if steps > joints.len() {
                 return Err(joint_error(
                     i,

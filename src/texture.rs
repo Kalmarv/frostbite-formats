@@ -61,7 +61,7 @@ pub fn read(bytes: &[u8]) -> Result<TextureHeader> {
     let r = Rd::new(bytes, W);
     let mut mip_sizes = [0u32; 15];
     for (i, s) in mip_sizes.iter_mut().enumerate() {
-        *s = r.u32le(0x38 + 4 * i)?;
+        *s = r.u32le(crate::at(0x38, i, 4))?;
     }
     let h = TextureHeader {
         unknown_00: r.arr(0)?,

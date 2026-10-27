@@ -79,7 +79,7 @@ fn every_program_record_of_the_install_reads_or_is_refused_by_name() {
             if a.rtype != lookup::PROGRAM_LOOKUP {
                 continue;
             }
-            let entry = bundle.resource(i);
+            let entry = bundle.resource(i).expect("resource index of the manifest");
             let payload = src.payload(entry.file, entry.size as usize).unwrap();
             let all = lookup::read_records(&payload, &a.rmeta).unwrap();
             let section = &payload[..u32le(&a.rmeta, 0)];

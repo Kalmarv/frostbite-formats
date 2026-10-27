@@ -1,5 +1,10 @@
 //! A bundle: its region in the TOC (the file table: where each of its files lives) and its binary manifest (the
 //! first file: names, SHA-1s and sizes of the bundle's EBX, resources and chunks, plus the chunk metadata DB).
+#![allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)] // lint-todo
 
 use crate::toc::Loc;
 use crate::{Rd, Result, bad, capacity, latin1};

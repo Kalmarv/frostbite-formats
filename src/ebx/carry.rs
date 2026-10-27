@@ -1,5 +1,10 @@
 //! Moving values between documents and tidying a document after an edit (ReSkate's `ebx_merge.cpp` does the same
 //! when it merges two documents' edits of one asset).
+#![allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)] // lint-todo
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{Document, FieldType, FieldValue, Instance, Object, Pointer, Value};

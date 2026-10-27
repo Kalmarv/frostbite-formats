@@ -44,6 +44,11 @@
 //! prefix not guessed. What the values themselves show: in a block a texture parameter's name hash carries the
 //! texture slot in its top 16 bits ([`crate::depot`]), so a name is that tag over 48 bits of something. The binding
 //! does not need the names: it is keyed by the hashes.
+#![allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)] // lint-todo
 
 use crate::lookup::RECORD_LEN;
 use crate::{Rd, Result, bad};

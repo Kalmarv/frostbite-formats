@@ -60,13 +60,14 @@ impl<'a> Scope<'a> {
     /// permutation or a streamable texture set).
     pub fn resource_by_id(&self, rtype: u32, id: u64) -> Option<Listed> {
         let &(b, i) = self.permutations.get(&(rtype, id))?;
-        Some(self.bundles[b].resource(i))
+        self.bundles.get(b)?.resource(i)
     }
 
     /// The bundle and entry of the resource of type `rtype` with `id`.
     pub fn resource_with_home(&self, rtype: u32, id: u64) -> Option<(&'a Bundle, Listed)> {
         let &(b, i) = self.permutations.get(&(rtype, id))?;
-        Some((&self.bundles[b], self.bundles[b].resource(i)))
+        let bundle = self.bundles.get(b)?;
+        Some((bundle, bundle.resource(i)?))
     }
 
     /// The bundle and entry of the permutation with `id`, a raster one first.
@@ -74,13 +75,15 @@ impl<'a> Scope<'a> {
         let &(b, i) = [permutation::RASTER, permutation::COMPUTE]
             .iter()
             .find_map(|t| self.permutations.get(&(*t, id)))?;
-        Some((&self.bundles[b], self.bundles[b].resource(i)))
+        let bundle = self.bundles.get(b)?;
+        Some((bundle, bundle.resource(i)?))
     }
 
     /// The bundle and entry of the CompiledBytecode resource named `name`.
     pub fn bytecode(&self, name: &str) -> Option<(&'a Bundle, Listed)> {
         let &(b, i) = self.bytecode.get(name)?;
-        Some((&self.bundles[b], self.bundles[b].resource(i)))
+        let bundle = self.bundles.get(b)?;
+        Some((bundle, bundle.resource(i)?))
     }
 
     /// The bundle `entry` was listed from, among these.

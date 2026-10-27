@@ -38,8 +38,10 @@ pub struct Block<'a> {
 /// Parse one complete CAS stream. Header: decoded size is BE u32 low 24 bits;
 /// high byte is dictionary metadata (unsupported, rejected). Byte 4 low 7 bits
 /// is codec; its high bit is reserved. Byte 5 low nibble supplies payload bits
-/// 16..19; bytes 6..7 are BE payload low16. Byte5 high nibble is retained by the
-/// format as flags (writer emits 0x70), not part of either length.
+/// 16..19; bytes 6..7 are BE payload low16. Byte 5 high nibble is a flags field,
+/// not part of either length, and is 7 in every block of the stock install
+/// (1,001,300) and of the 82 mod folders installed with it (1,535,187 blocks,
+/// maps compiled by ReSkate Studio among them); any other value is refused.
 pub fn blocks(input: &[u8]) -> Result<Vec<Block<'_>>> {
     let mut out = Vec::new();
     let mut pos = 0;
@@ -53,6 +55,12 @@ pub fn blocks(input: &[u8]) -> Result<Vec<Block<'_>>> {
             return Err(invalid(
                 pos,
                 "dictionary/reserved flag unsupported: expected byte 0 and the top bit of byte 4 clear",
+            ));
+        }
+        if s1 >> 4 != 7 {
+            return Err(invalid(
+                pos,
+                "block flags unsupported: expected the high nibble of byte 5 to be 7",
             ));
         }
         let decoded_size = (usize::from(d1) << 16) | (usize::from(d2) << 8) | usize::from(d3);

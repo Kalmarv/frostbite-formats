@@ -155,7 +155,8 @@ pub struct Asset {
     pub name: String,
     /// SHA-1 of the stored bytes, from the manifest's hash table (one per asset, EBX then resources then chunks).
     pub sha1: [u8; 20],
-    /// Uncompressed size in bytes. For a chunk it is `(loff & 0xFFFF) | lsize`, as the manifest has no separate field for it.
+    /// Uncompressed size in bytes. For a chunk it is [`Asset::lsize`], the size of the stored range, as the manifest
+    /// has no separate field for it; the whole chunk's size is [`Asset::chunk_size`].
     pub size: u32,
     /// Resource type id (resources only; 0 otherwise).
     pub rtype: u32,
@@ -165,13 +166,21 @@ pub struct Asset {
     pub rid: u64,
     /// Chunk GUID (chunks only), with the byte order of the TOC's chunk table.
     pub guid: [u8; 16],
-    /// Chunk logical offset (chunks only): the 32-bit value stored in the chunk record.
+    /// Chunk logical offset (chunks only): the 32-bit value stored in the chunk record. It is where the stored range
+    /// begins inside the whole chunk, a multiple of 65,536 (it is not zero for a texture whose first mips are left
+    /// out of the bundle).
     pub loff: u32,
-    /// Chunk logical size (chunks only): the 32-bit value stored in the chunk record.
+    /// Chunk logical size (chunks only): the 32-bit value stored in the chunk record, the decoded size of the range
+    /// the bundle stores.
     pub lsize: u32,
 }
 
 impl Asset {
+    /// The size of the whole chunk (chunks only): the stored range's [`Asset::loff`] plus its [`Asset::lsize`].
+    pub fn chunk_size(&self) -> u64 {
+        u64::from(self.loff).saturating_add(u64::from(self.lsize))
+    }
+
     fn new(kind: Kind) -> Self {
         Self {
             kind,
@@ -325,7 +334,7 @@ pub fn read_manifest(m: &[u8]) -> Result<Manifest> {
         a.lsize = u32e(pos.saturating_add(20))?;
         pos = pos.saturating_add(24);
         a.sha1 = *hash;
-        a.size = (a.loff & 0xFFFF) | a.lsize;
+        a.size = a.lsize;
         b.chunks.push(a);
     }
     if ms > 0 {

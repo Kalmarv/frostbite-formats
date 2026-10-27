@@ -50,6 +50,17 @@ fn strict_framing() -> R {
     dictionary[0] = 1;
     assert!(blocks(&dictionary).is_err());
     assert_eq!(CasRaw.compress(&[])?, [0, 0, 0, 0, 0, 0x70, 0, 0]);
+    // the flags nibble of byte 5 is 7 in every block of the game and of the mods written for it; another is refused,
+    // and the size bits next to it still count (a stored 64 KiB block is `0x71`)
+    let mut flags = CasRaw.compress(b"hello")?;
+    flags[5] = 0x10;
+    assert!(blocks(&flags).is_err());
+    flags[5] = 0x00;
+    assert!(blocks(&flags).is_err());
+    let mut full = vec![0, 1, 0, 0, 0, 0x71, 0, 0];
+    full.extend(vec![0u8; 65536]);
+    let parsed = blocks(&full)?;
+    assert_eq!((parsed[0].decoded_size, parsed[0].payload.len()), (65536, 65536));
     Ok(())
 }
 

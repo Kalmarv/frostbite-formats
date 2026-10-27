@@ -168,6 +168,7 @@ pub fn write(dep: &Depot) -> Result<(Vec<u8>, [u8; 16])> {
 pub const TEXTURE: u32 = 0x14c5_fc30;
 fn elem_size(ty: u32) -> Option<usize> {
     Some(match ty {
+        0x566e_2dd0 => 1,
         0x2bb6_5c2d | 0x36ed_3444 | 0x8e4a_817e | 0x57f9_70ca | 0x7826_e998 => 4,
         0x885e_ff59 => 12,
         0x7f99_9829 => 16,

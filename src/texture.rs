@@ -1,26 +1,29 @@
 //! Texture resources (type [`crate::TEXTURE`]): the 180-byte header skate. stores for a texture, whose pixels lie in
 //! the chunk it names. Field layout after ReSkate's `Engine/Resource/texture.cpp` (`read_texture_header`, a port of
 //! ReSkate Studio's texture resource), which reads the extended 180-byte form when the resource metadata's version is
-//! 12 or 13:
+//! 12 or 13; the fields it does not read are named from the stock install's textures (every texture resource of the
+//! install read, 61,618 headers):
 //!
 //! ```text
-//! 0x00  8  unknown_00     not read by ReSkate
+//! 0x00  u32 mip1_block_offset, u32 mip2_block_offset
+//!                         physical offsets into the chunk's stored range: see [`TextureHeader::mip_block_offsets`]
 //! 0x08  u32 kind          0 a 2D texture, 1 a cube (depth and slices 6), 2 a volume (depth and slices its depth),
 //!                         3 an array (depth and slices its layers)
 //! 0x0c  u32 format        Frostbite format ordinal ([`block`])
-//! 0x10  u32 unknown_10    skipped by ReSkate (metadata version >= 12)
+//! 0x10  u32 pool_id       0 in every stock texture
 //! 0x14  u16 flags, u16 width, u16 height, u16 depth, u16 slices
 //! 0x1e  u8 mip count, u8 first mip
-//! 0x20  8  unknown_20     skipped by ReSkate (extended form)
+//! 0x20  8  unknown_20     skipped by ReSkate (extended form); byte 0x21 is the mip count in every stock texture
 //! 0x28  16 chunk GUID     the chunk holding the pixels
 //! 0x38  15 u32 mip sizes  bytes of each level of one slice, largest first
 //! 0x74  u32 chunk size
-//! 0x78  60 unknown_78     not read by ReSkate (a texture group name at 0x80 in the base game's textures)
+//! 0x78  u32 name_hash     the djb2-xor hash ([`crate::djb2`]) of the resource's lowercase name
+//! 0x7c  u32 unknown_7c    not understood: matches no hash of the name or its parts
+//! 0x80  52 unknown_80     not read by ReSkate (a texture group name starts here in the base game's textures)
 //! ```
 //!
-//! The fields ReSkate does not read are kept as stored, so a header read and written again is byte-identical; what
-//! they mean is not established. Refused: another length, a width or height of 0 or over 16384, a mip count of 0 or
-//! over 15.
+//! The fields no one reads are kept as stored, so a header read and written again is byte-identical. Refused: another
+//! length, a width or height of 0 or over 16384, a mip count of 0 or over 15.
 
 use crate::{Rd, Result, bad};
 
@@ -30,18 +33,34 @@ pub const HEADER_LEN: usize = 180;
 /// The largest side ReSkate accepts.
 pub const MAX_SIDE: u16 = 16384;
 
+/// The bits of [`TextureHeader::flags`] stock textures use. Every stock texture's flags are 0, [`flags::STREAMING`],
+/// `STREAMING | ON_DEMAND_LOADED` or [`flags::NO_SKIPMIP`]; the names follow the community readings of the other bits.
+pub mod flags {
+    /// The pixels are streamed from a chunk (set in 49,670 of the 61,618 stock textures, 11,373 more with
+    /// [`ON_DEMAND_LOADED`]).
+    pub const STREAMING: u16 = 0x0001;
+    /// The streamed pixels are loaded on demand.
+    pub const ON_DEMAND_LOADED: u16 = 0x0008;
+    /// The texture's top mips are never skipped (one stock texture).
+    pub const NO_SKIPMIP: u16 = 0x0020;
+}
+
 /// A texture's 180-byte header: its dimensions, format, mip chain and the chunk that holds the pixels. Offsets are in the module documentation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TextureHeader {
-    /// The 8 bytes at 0x00, kept as stored; their meaning is not known.
-    pub unknown_00: [u8; 8],
-    /// 0 a 2D texture.
+    /// The u32s at 0x00 and 0x04: the byte offset, from the start of the pixel chunk's stored range in its CAS
+    /// archive (block headers counted), of the 64 KiB block that holds the first byte of mip level 1 and of level 2.
+    /// In the 39,632 stock textures whose chunk is in the TOC table and which carry them (not both zero) this holds
+    /// for both; they are zero for a chunk of one block and for some chunks of several (5,213 in the stock install,
+    /// a rule not found).
+    pub mip_block_offsets: [u32; 2],
+    /// 0 a 2D texture, 1 a cube, 2 a volume, 3 an array: the only kinds stock textures use.
     pub kind: u32,
     /// Frostbite format ordinal.
     pub format: u32,
-    /// The u32 at 0x10, kept as stored; its meaning is not known.
-    pub unknown_10: u32,
-    /// The u16 at 0x14, kept as stored.
+    /// The u32 at 0x10: a pool id, 0 in every stock texture.
+    pub pool_id: u32,
+    /// The u16 at 0x14, kept as stored: bits of [`flags`].
     pub flags: u16,
     /// Width in texels (u16 at 0x16); 1 to [`MAX_SIDE`].
     pub width: u16,
@@ -55,7 +74,8 @@ pub struct TextureHeader {
     pub mip_count: u8,
     /// Index of the first mip level (u8 at 0x1f).
     pub first_mip: u8,
-    /// The 8 bytes at 0x20, kept as stored; their meaning is not known.
+    /// The 8 bytes at 0x20, kept as stored; byte 1 is the mip count in every stock texture and byte 0 is never below
+    /// the first mip level.
     pub unknown_20: [u8; 8],
     /// GUID of the chunk that holds the pixels (16 bytes at 0x28), in the byte order of the TOC's chunk table.
     pub chunk: [u8; 16],
@@ -63,8 +83,12 @@ pub struct TextureHeader {
     pub mip_sizes: [u32; 15],
     /// Size in bytes of the pixel chunk (u32 at 0x74).
     pub chunk_size: u32,
-    /// The 60 bytes at 0x78, kept as stored (a texture group name starts at 0x80 in the base game's textures).
-    pub unknown_78: [u8; 60],
+    /// The u32 at 0x78: the [`crate::djb2`] hash of the resource's lowercase name (all 61,618 stock textures).
+    pub name_hash: u32,
+    /// The u32 at 0x7c, kept as stored; its meaning is not known.
+    pub unknown_7c: u32,
+    /// The 52 bytes at 0x80, kept as stored (a texture group name starts here in the base game's textures).
+    pub unknown_80: [u8; 52],
 }
 
 /// Read a texture header. Refused: see the module documentation.
@@ -78,10 +102,10 @@ pub fn read(bytes: &[u8]) -> Result<TextureHeader> {
         *s = r.u32le(crate::at(0x38, i, 4))?;
     }
     let h = TextureHeader {
-        unknown_00: r.arr(0)?,
+        mip_block_offsets: [r.u32le(0)?, r.u32le(4)?],
         kind: r.u32le(0x08)?,
         format: r.u32le(0x0c)?,
-        unknown_10: r.u32le(0x10)?,
+        pool_id: r.u32le(0x10)?,
         flags: r.u16le(0x14)?,
         width: r.u16le(0x16)?,
         height: r.u16le(0x18)?,
@@ -93,7 +117,9 @@ pub fn read(bytes: &[u8]) -> Result<TextureHeader> {
         chunk: r.arr(0x28)?,
         mip_sizes,
         chunk_size: r.u32le(0x74)?,
-        unknown_78: r.arr(0x78)?,
+        name_hash: r.u32le(0x78)?,
+        unknown_7c: r.u32le(0x7c)?,
+        unknown_80: r.arr(0x80)?,
     };
     check(&h)?;
     Ok(h)
@@ -113,8 +139,13 @@ fn check(h: &TextureHeader) -> Result<()> {
 pub fn write(h: &TextureHeader) -> Result<Vec<u8>> {
     check(h)?;
     let mut o = Vec::with_capacity(HEADER_LEN);
-    o.extend_from_slice(&h.unknown_00);
-    for w in [h.kind, h.format, h.unknown_10] {
+    for w in [
+        h.mip_block_offsets[0],
+        h.mip_block_offsets[1],
+        h.kind,
+        h.format,
+        h.pool_id,
+    ] {
         o.extend_from_slice(&w.to_le_bytes());
     }
     for v in [h.flags, h.width, h.height, h.depth, h.slices] {
@@ -127,7 +158,9 @@ pub fn write(h: &TextureHeader) -> Result<Vec<u8>> {
         o.extend_from_slice(&s.to_le_bytes());
     }
     o.extend_from_slice(&h.chunk_size.to_le_bytes());
-    o.extend_from_slice(&h.unknown_78);
+    o.extend_from_slice(&h.name_hash.to_le_bytes());
+    o.extend_from_slice(&h.unknown_7c.to_le_bytes());
+    o.extend_from_slice(&h.unknown_80);
     debug_assert_eq!(o.len(), HEADER_LEN);
     Ok(o)
 }

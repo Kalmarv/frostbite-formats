@@ -138,7 +138,8 @@ impl Bundle {
     }
 
     /// The chunk with GUID `guid` (as stored): its bytes' place and decoded size, from this bundle or else from the
-    /// TOC's chunk table (content copied from the base game lies there).
+    /// TOC's chunk table (content copied from the base game lies there). From the bundle it is the range the manifest
+    /// stores (`lsize` bytes, which begin `loff` bytes into the whole chunk: [`Bundle::toc_chunk`] gives the whole).
     pub fn chunk(&self, src: &Source<'_>, guid: &[u8; 16]) -> Result<(FileRef, usize)> {
         let m = &self.manifest;
         if let Some((i, c)) = m.chunks.iter().enumerate().find(|(_, c)| &c.guid == guid) {

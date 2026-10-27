@@ -98,11 +98,21 @@ fn synthetic_manifest_round_trip() -> R {
     chunk.guid = [5; 16];
     chunk.lsize = 1234;
     chunk.size = 1234;
+    // a chunk the bundle stores the tail of (three 64 KiB blocks before it): its size is the stored range's, the whole
+    // chunk's is `loff + lsize`; a stray low bit in `loff` does not make its way into the size
+    let mut tail = chunk.clone();
+    tail.guid = [6; 16];
+    tail.loff = 3 * 65536;
+    tail.lsize = 40_000;
+    tail.size = 40_000;
+    let mut stray = tail.clone();
+    stray.guid = [7; 16];
+    stray.loff |= 0x0101;
     ebx.size = 11;
     let m = Manifest {
         ebx: vec![ebx],
         res: vec![res],
-        chunks: vec![chunk],
+        chunks: vec![chunk, tail, stray],
         meta: vec![1, 2, 3, 0],
         big_endian: false,
     };
@@ -111,6 +121,9 @@ fn synthetic_manifest_round_trip() -> R {
     let back = bundle::read_manifest(&bytes)?;
     assert_eq!(back, m);
     assert_eq!(bundle::write_manifest(&back)?, bytes);
+    assert_eq!(back.chunks[1].size, 40_000);
+    assert_eq!(back.chunks[1].chunk_size(), 3 * 65536 + 40_000);
+    assert_eq!(back.chunks[2].size, 40_000);
     Ok(())
 }
 
@@ -146,6 +159,29 @@ fn synthetic_depot_round_trip() -> R {
     assert_eq!(back, dep);
     assert_eq!(depot::write(&back).unwrap(), (bytes, meta));
     assert_eq!(depot::params(&dep.blocks[0].data)?.len(), 2);
+    Ok(())
+}
+
+#[test]
+fn a_parameter_of_one_byte_elements_is_walked() -> R {
+    // type 0x566e2dd0 holds one byte an element: 3 values make a 23-byte record, so the next one starts at 4 + 23
+    let mut b = 2u32.to_le_bytes().to_vec();
+    b.extend(0x1000u64.to_le_bytes());
+    b.extend(0x566e_2dd0u32.to_le_bytes());
+    b.extend([3, 0, 0, 0, 3, 0, 0, 0]);
+    b.extend([1, 0, 1]);
+    b.extend(0x2000u64.to_le_bytes());
+    b.extend(0x2bb6_5c2du32.to_le_bytes());
+    b.extend([1, 0, 0, 0, 1, 0, 0, 0]);
+    b.extend(1.5f32.to_le_bytes());
+    let params = depot::params(&b)?;
+    assert_eq!(
+        params.iter().map(|p| (p.ty, p.at, p.len)).collect::<Vec<_>>(),
+        [(0x566e_2dd0, 4, 23), (0x2bb6_5c2d, 27, 24)]
+    );
+    // a byte short of the last record is still refused
+    b.pop();
+    assert!(depot::params(&b).is_err());
     Ok(())
 }
 

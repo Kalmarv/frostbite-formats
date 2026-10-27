@@ -84,12 +84,13 @@ pub struct Set {
     pub relocations: Vec<u32>,
 }
 
-/// The size of a constant-buffer group: the end of its last parameter, from its entries.
 impl Group {
-    pub fn buffer_end(&self) -> u32 {
+    /// The size of a constant-buffer group: the end of its last parameter, from its entries. A `u64`: a stored offset
+    /// near `u32::MAX` plus a size does not fit 32 bits.
+    pub fn buffer_end(&self) -> u64 {
         (self.entries.iter())
             .filter(|e| e.at != u32::MAX)
-            .map(|e| e.at + u32::from(e.kind) / 4)
+            .map(|e| u64::from(e.at) + u64::from(e.kind) / 4)
             .max()
             .unwrap_or(0)
     }

@@ -41,6 +41,15 @@ fn bad(detail: impl Into<String>) -> Error {
     }
 }
 
+/// A hierarchy error at joint `i`.
+fn joint_error(i: usize, detail: String) -> Error {
+    Error::Format {
+        what: "skeleton asset",
+        offset: i,
+        detail: format!("joint {i}: {detail}"),
+    }
+}
+
 fn int(v: &Value, what: &str) -> Result<i64> {
     match v {
         Value::Int(i) => Ok(*i),
@@ -129,25 +138,29 @@ pub fn read(doc: &Document) -> Result<Option<(String, Vec<SkeletonJoint>)>> {
             )?,
         });
     }
-    verify_hierarchy(&joints).map_err(bad)?;
+    verify_hierarchy(&joints)?;
     Ok(Some((name, joints)))
 }
 
-/// No cycle through the parents.
-pub fn verify_hierarchy(joints: &[SkeletonJoint]) -> std::result::Result<(), String> {
+/// No cycle through the parents, and every parent a joint of the skeleton. The error's offset is the index of the joint
+/// whose parents fail (the joints are values, not bytes).
+pub fn verify_hierarchy(joints: &[SkeletonJoint]) -> Result<()> {
     for (i, _) in joints.iter().enumerate() {
         let mut at = joints[i].parent;
         let mut steps = 0usize;
         while let Some(p) = at {
             steps += 1;
             if steps > joints.len() {
-                return Err(format!(
-                    "joint {i}: the parents lead back to a joint already passed"
+                return Err(joint_error(
+                    i,
+                    "the parents lead back to a joint already passed".into(),
                 ));
             }
             at = joints
                 .get(p as usize)
-                .ok_or_else(|| format!("joint {i}: parent {p}"))?
+                .ok_or_else(|| {
+                    joint_error(i, format!("parent {p} is not one of the {} joints", joints.len()))
+                })?
                 .parent;
         }
     }

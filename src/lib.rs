@@ -23,8 +23,7 @@
 //!
 //! Readers are strict and bounds-checked: they walk to the exact end of what they read and refuse what they do not
 //! know, with an error that names what was being read, the offset and what was expected. They are not yet
-//! guaranteed panic-free on arbitrary bytes (a few arithmetic overflows on stored values panic in debug builds; the
-//! README lists them). Writers are the readers' counterparts: what a reader accepts is written back byte for byte
+//! guaranteed panic-free on arbitrary bytes (the overflows found so far are fixed and pinned in `tests/robust.rs`). Writers are the readers' counterparts: what a reader accepts is written back byte for byte
 //! (TOCs only in the Patch layout, with plain names; an EBX document when it already has the writer's layout), or the
 //! writer says why it cannot. The crate holds no game data and no keys. Oodle-compressed CAS blocks are decoded through the caller's own
 //! handle to the game's Oodle library ([`cas::Cas`]); the library is not shipped.

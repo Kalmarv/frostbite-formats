@@ -72,7 +72,7 @@ cargo run --example list_bundles -- <game>/Data Win32/globals.toc <game>/oo2core
 - It does not ship, find or download any game file, and it does not ship Oodle.
 - It does not decode pixels, vertices or shader code: it reads the headers, tables and records around them (a texture header, a MeshSet's sections and where their vertices lie in the geometry chunk, the DXBC containers of a bytecode resource).
 - It does not read other Frostbite games, and it is not compatible with Frosty's own project or mod formats beyond the `.fbmod` layout named above.
-- It does not yet promise to be panic-free on arbitrary bytes. Three arithmetic overflows on stored values are known to panic in debug builds: `toc::lookup` (a hash-map entry of `i32::MIN`), `physics::read` (a face offset near `0xFFFF`) and `binding::Group::buffer_end` (an entry near `u32::MAX`). The tests in `tests/robust.rs` cover nesting, Latin-1 names and LOD counts only.
+- It does not yet promise to be panic-free on arbitrary bytes. The overflows on stored values found so far (a TOC hash-map entry of `i32::MIN`, a physics face offset of `0xFFFF`, a binding entry near `u32::MAX`) are fixed and pinned in `tests/robust.rs`, which also covers nesting, Latin-1 names and LOD counts; the readers are not yet proven free of the rest.
 - Whole files are read into memory; there is no streaming reader.
 
 ## Tests

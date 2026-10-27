@@ -3,7 +3,7 @@
 //! Base-game TOCs store names Huffman-coded (flag 4); Patch TOCs (the ones in a folder of added or replaced files,
 //! as ReSkate Studio writes it beside the game's `Data`) store them as plain strings, which is what [`write()`] writes.
 
-use crate::{Rd, Result, align, bad, latin1};
+use crate::{Error, Rd, Result, align, bad, latin1};
 
 /// Length of the envelope that precedes a TOC's (or `layout.toc`'s) own data.
 pub const ENVELOPE: usize = 0x22C;
@@ -137,12 +137,33 @@ impl Huffman {
 
 /// Read a TOC (envelope included). Refused: a wrong envelope, a negative count, a table or string outside the
 /// file, a bundle region that is not inline, a Huffman table or name that does not decode, a chunk reference that
-/// does not resolve.
+/// does not resolve. An error's offset is into `data`, the envelope included.
 pub fn read(data: &[u8]) -> Result<Toc> {
-    if data.len() < ENVELOPE + 48 || data[..4] != MAGIC {
-        return Err(bad(W, 0, "envelope is invalid"));
+    match data.split_at_checked(ENVELOPE) {
+        Some((envelope, body)) if body.len() >= 48 && envelope.starts_with(&MAGIC) => read_body(body)
+            .map_err(|e| match e {
+                Error::Format { what, offset, detail } => Error::Format {
+                    what,
+                    offset: offset.saturating_add(ENVELOPE),
+                    detail,
+                },
+                other => other,
+            }),
+        _ => Err(bad(
+            W,
+            0,
+            format!(
+                "envelope is invalid: expected the magic {MAGIC:02x?} and {} bytes at least, got {} bytes",
+                ENVELOPE + 48,
+                data.len()
+            ),
+        )),
     }
-    let r = Rd::new(&data[ENVELOPE..], W);
+}
+
+/// The TOC after its envelope; error offsets are into `data`.
+fn read_body(data: &[u8]) -> Result<Toc> {
+    let r = Rd::new(data, W);
     let u = |i: usize| r.u32be(4 * i);
     let (bho, bdo, cho, cgo, nameso, cdo, flags) = (
         u(0)? as usize,
@@ -154,7 +175,7 @@ pub fn read(data: &[u8]) -> Result<Toc> {
         u(11)?,
     );
     let count = |i: usize| -> Result<usize> {
-        usize::try_from(r.i32be(4 * i)?).map_err(|_| bad(W, 4 * i, "negative count"))
+        usize::try_from(r.i32be(4 * i)?).map_err(|_| bad(W, 4 * i, "count is negative, expected 0 or more"))
     };
     let (bcount, ccount, dcount) = (count(2)?, count(5)?, count(10)?);
     let huffman = if flags & 4 != 0 {
@@ -179,13 +200,23 @@ pub fn read(data: &[u8]) -> Result<Toc> {
         let at = bdo + 16 * i;
         let (no, sf, ro) = (r.u32be(at)? as usize, r.u32be(at + 4)?, r.u64be(at + 8)?);
         if sf >> 30 != 1 {
-            return Err(bad(W, at, "bundle region is not inline"));
+            return Err(bad(
+                W,
+                at + 4,
+                format!("bundle region flags {sf:#x}: expected the inline form (bits 31..30 equal to 0b01)"),
+            ));
         }
         let name = match &huffman {
             Some(h) => h.decode(no)?,
             None => r.cstr(nameso + no)?,
         };
-        let ro = usize::try_from(ro).map_err(|_| bad(W, at, "region offset"))?;
+        let ro = usize::try_from(ro).map_err(|_| {
+            bad(
+                W,
+                at + 8,
+                format!("region offset {ro:#x} does not fit the address space"),
+            )
+        })?;
         toc.bundles
             .push((name, r.bytes(ro, (sf & 0x3FFF_FFFF) as usize)?.to_vec()));
     }
@@ -205,7 +236,14 @@ pub fn read(data: &[u8]) -> Result<Toc> {
             }
             let (flag, w) = ((enc as u32) >> 24, (enc as u32 & 0xFF_FFFF) as usize);
             if flag != 0x80 || w + 4 > words.len() {
-                return Err(bad(W, at, "chunk data reference is invalid"));
+                return Err(bad(
+                    W,
+                    at + 16,
+                    format!(
+                        "chunk data reference {enc:#010x}: expected -1 or 0x80 and the index of a 4-word record among the {} data words",
+                        words.len()
+                    ),
+                ));
             }
             let id = (u64::from(words[w]) << 32) | u64::from(words[w + 1]);
             toc.chunks.push(TocChunk {
@@ -297,7 +335,8 @@ pub fn lookup(map: &[i32], ordered: &[Vec<u8>], key: &[u8]) -> Option<usize> {
     }
     let v = map[hash_with(key, FNV_SEED) as usize % map.len()];
     let i = if v < 0 {
-        (-v - 1) as usize
+        // the stored `-slot - 1`, which is `!v`; no negation, so `i32::MIN` is the (absent) slot 2^31 - 1
+        !v as usize
     } else {
         hash_with(key, v as u32) as usize % map.len()
     };

@@ -255,7 +255,9 @@ pub fn read(d: &[u8]) -> Result<PhysicsResource> {
         let faces = u16s(&r, sl[7], nf + 1)?;
         if faces.first() != Some(&0)
             || faces.last().map(|&l| l as usize) != Some(nc)
-            || faces.windows(2).any(|w| w[1] < w[0] + 3)
+            || faces
+                .windows(2)
+                .any(|w| usize::from(w[1]) < usize::from(w[0]) + 3)
         {
             return Err(bad(
                 W,

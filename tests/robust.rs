@@ -5,6 +5,7 @@
 
 use frostbite_formats::db::{self, MAX_DEPTH, Node};
 use frostbite_formats::meshset;
+use frostbite_formats::{binding, physics, toc};
 
 /// `levels` unnamed objects, one inside the next, the innermost empty: a node tag (2, unnamed) and the varint size of
 /// what it holds.
@@ -88,4 +89,87 @@ fn a_lod_count_past_the_header_is_refused() {
     d[0] = 0xb0;
     let e = meshset::read(&d).unwrap_err().to_string();
     assert!(e.contains("header of 0xc0 bytes"), "{e}");
+}
+
+/// A hash-map entry of `i32::MIN` made `-v - 1` overflow (a panic in debug builds); it names a slot no table has.
+#[test]
+fn a_toc_hash_entry_of_i32_min_finds_nothing() {
+    let key = b"levels/test".to_vec();
+    assert_eq!(toc::lookup(&[i32::MIN], std::slice::from_ref(&key), &key), None);
+    assert_eq!(toc::lookup(&[-1], std::slice::from_ref(&key), &key), Some(0));
+}
+
+/// A resource whose face offsets step to `0xFFFF` made `w[0] + 3` overflow a `u16`; the offsets are refused by name.
+#[test]
+fn a_physics_face_offset_of_0xffff_is_refused() {
+    let (positions, triangles) = (
+        vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        vec![[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]],
+    );
+    let (shape, centre) = physics::mesh_shape(&positions, &triangles).unwrap().unwrap();
+    let res = physics::PhysicsResource {
+        version: 2,
+        word08: 0,
+        body: Vec::new(),
+        shapes: vec![shape],
+        parts: vec![physics::Part::mesh(0, centre, [1, 2, 3], 96)],
+    };
+    let mut b = physics::write(&res).unwrap();
+    assert_eq!(physics::read(&b).unwrap(), res);
+    // the first shape starts at 0x38 (no body); its face-offset slot is at +0x24 + 4 * 7, relative to the slot
+    let u32_at = |b: &[u8], at: usize| u32::from_le_bytes(b[at..at + 4].try_into().unwrap()) as usize;
+    let slot = 0x38 + 0x24 + 4 * 7;
+    let faces = slot + u32_at(&b, slot);
+    b[faces + 2..faces + 4].copy_from_slice(&0xFFFFu16.to_le_bytes());
+    let e = physics::read(&b).unwrap_err().to_string();
+    assert!(e.contains("face offsets"), "{e}");
+}
+
+/// An entry near `u32::MAX` made the buffer's end wrap (a panic in debug builds); the end is reported whole.
+#[test]
+fn a_binding_buffer_end_past_u32_is_reported_whole() {
+    let group = binding::Group {
+        name: 1,
+        size: 16,
+        flags: [0; 4],
+        words: [0; 4],
+        params: Vec::new(),
+        entries: vec![
+            binding::Entry {
+                at: u32::MAX - 1,
+                marker: 0xFFFF,
+                kind: 0x30,
+            },
+            binding::Entry {
+                at: u32::MAX,
+                marker: 0xFFFF,
+                kind: 0x30,
+            },
+        ],
+    };
+    assert_eq!(group.buffer_end(), u64::from(u32::MAX - 1) + 12);
+}
+
+/// A TOC's error offsets are into the file, envelope included: the bytes after the envelope start at 0x22C.
+#[test]
+fn a_toc_error_offset_counts_the_envelope() {
+    let region = frostbite_formats::bundle::write_region(&[], &[]);
+    let mut b = toc::write(&[("a/b".to_string(), region)], &[], 0).unwrap();
+    // the bundle count is the third word after the envelope
+    b[toc::ENVELOPE + 8..toc::ENVELOPE + 12].copy_from_slice(&(-1i32).to_be_bytes());
+    match toc::read(&b).unwrap_err() {
+        frostbite_formats::Error::Format { offset, detail, .. } => {
+            assert_eq!(offset, toc::ENVELOPE + 8);
+            assert!(
+                detail.contains("negative") && detail.contains("expected"),
+                "{detail}"
+            );
+        }
+        other => panic!("{other}"),
+    }
+    let e = toc::read(&b[..100]).unwrap_err().to_string();
+    assert!(
+        e.contains("toc at 0x0: envelope is invalid: expected the magic"),
+        "{e}"
+    );
 }

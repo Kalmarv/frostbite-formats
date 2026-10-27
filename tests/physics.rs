@@ -271,3 +271,51 @@ fn the_games_own_resources_round_trip() -> R {
     }
     Ok(())
 }
+
+/// Stored or caller-given counts, offsets and indices that run past what they describe are refused with an error, not
+/// a panic: every truncation of a written resource, edge data over faces that do not tile the corners or name a
+/// missing vertex, a shape with more faces than a u16 holds.
+#[test]
+fn hostile_counts_and_indices_are_refused() {
+    let (p, t) = cube();
+    let w = weld(&p, &t).unwrap();
+    let (s, centre) = mesh_shape(&w.positions, &w.triangles).unwrap().unwrap();
+    let res = PhysicsResource {
+        version: 2,
+        word08: 0,
+        body: Vec::new(),
+        shapes: vec![s.clone()],
+        parts: vec![Part::mesh(0, centre, [1, 2, 3], 96)],
+    };
+    let b = physics::write(&res).unwrap();
+    for n in 0..b.len() {
+        let _ = physics::read(&b[..n]);
+    }
+    for at in [0x0C, 0x18, 0x24, 0x28, 0x2C, 0x30, 0x34] {
+        let mut c = b.clone();
+        c[at..at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(physics::read(&c).is_err(), "field at {at:#x}");
+    }
+
+    let (faces, corners) = (&s.faces, &s.corners);
+    let e = physics::edges(&s.vertices, faces, &corners[..corners.len() - 1])
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("physics resource at"), "{e}");
+    let mut gapped = faces.clone();
+    gapped[1] = 0xFFFF;
+    assert!(physics::edges(&s.vertices, &gapped, corners).is_err());
+    let e = physics::edges(&s.vertices[..2], faces, corners)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("names vertex"), "{e}");
+    assert_eq!(physics::edges(&s.vertices, faces, corners).unwrap(), s.edges);
+
+    let mut huge = s;
+    huge.faces = (0..=0x1_0000u32).map(|f| f as u16).collect();
+    let res = PhysicsResource {
+        shapes: vec![huge],
+        ..res
+    };
+    assert!(physics::write(&res).is_err());
+}

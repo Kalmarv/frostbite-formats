@@ -30,15 +30,10 @@
 //! (polygon faces, no edge data, no tree, zero bounds). The kind lives in the part, not the shape. Every fact here is
 //! read from ReSkate Studio 20261012's writer (`reskate_cli`, unpacked: FUN_140160250, FUN_14015c790 and the functions
 //! named below) and checked against Studio's output and the game's own resources (`tests/physics.rs`).
-#![allow(
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-    clippy::cast_possible_truncation
-)] // lint-todo
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use crate::{Rd, Result, bad, capacity};
+use crate::{Rd, Result, bad, capacity, u32_len};
 
 const W: &str = "physics resource";
 /// The resource type id of a PhysicsResource.
@@ -162,44 +157,57 @@ impl Shape {
     }
 
     /// The vertex -> corner index: `offsets` (one per vertex and one more) into `ids`, the corners of each vertex in
-    /// corner order.
+    /// corner order. For a shape within the u16 limits ([`write()`] refuses the others); a corner that names no vertex
+    /// is left out.
     pub fn corner_index(&self) -> (Vec<u16>, Vec<u16>) {
-        let mut offsets = vec![0u16; self.vertices.len() + 1];
+        let mut offsets = vec![0u16; self.vertices.len().saturating_add(1)];
         for &v in &self.corners {
-            if let Some(o) = offsets.get_mut(v as usize + 1) {
-                *o += 1;
+            if let Some(o) = offsets.get_mut(usize::from(v).saturating_add(1)) {
+                *o = o.saturating_add(1);
             }
         }
-        for i in 0..self.vertices.len() {
-            offsets[i + 1] += offsets[i];
+        let mut sum = 0u16;
+        for o in &mut offsets {
+            sum = sum.saturating_add(*o);
+            *o = sum;
         }
-        let mut next: Vec<u16> = offsets[..self.vertices.len()].to_vec();
+        let mut next: Vec<u16> = offsets.iter().copied().take(self.vertices.len()).collect();
         let mut ids = vec![0u16; self.corners.len()];
         for (c, &v) in self.corners.iter().enumerate() {
-            if let Some(n) = next.get_mut(v as usize) {
-                ids[*n as usize] = c as u16;
-                *n += 1;
+            let (Ok(c), Some(n)) = (u16::try_from(c), next.get_mut(usize::from(v))) else {
+                continue;
+            };
+            if let Some(id) = ids.get_mut(usize::from(*n)) {
+                *id = c;
             }
+            *n = n.saturating_add(1);
         }
         (offsets, ids)
     }
 }
 
+/// The absolute offset a self-relative field at `at` names; 0 (no array) stays 0.
 fn rel(r: &Rd, at: usize) -> Result<usize> {
-    let v = r.u32le(at)? as usize;
-    Ok(if v == 0 { 0 } else { at + v })
+    let v = r.size32le(at)?;
+    if v == 0 {
+        return Ok(0);
+    }
+    at.checked_add(v).ok_or_else(|| {
+        bad(
+            W,
+            at,
+            format!("relative offset {v:#x} runs past the address space"),
+        )
+    })
 }
 
 fn f32s3(r: &Rd, at: usize) -> Result<[f32; 3]> {
-    Ok([
-        f32::from_bits(r.u32le(at)?),
-        f32::from_bits(r.u32le(at + 4)?),
-        f32::from_bits(r.u32le(at + 8)?),
-    ])
+    let word = |k: usize| -> Result<f32> { Ok(f32::from_bits(r.u32le(crate::at(at, k, 4))?)) };
+    Ok([word(0)?, word(1)?, word(2)?])
 }
 
 fn u16s(r: &Rd, at: usize, n: usize) -> Result<Vec<u16>> {
-    let b = r.bytes(at, 2 * n)?;
+    let b = r.bytes(at, n.saturating_mul(2))?;
     Ok(b.as_chunks::<2>()
         .0
         .iter()
@@ -207,8 +215,10 @@ fn u16s(r: &Rd, at: usize, n: usize) -> Result<Vec<u16>> {
         .collect())
 }
 
+/// Bit `i` of the bit array at `at`.
 fn bit(r: &Rd, at: usize, i: usize) -> Result<bool> {
-    Ok(r.u32le(at + 4 * (i / 32))? >> (i % 32) & 1 == 1)
+    let word = r.u32le(crate::at(at, i / 32, 4))?;
+    Ok(u32::try_from(i % 32).is_ok_and(|k| word.wrapping_shr(k) & 1 == 1))
 }
 
 /// The resource read: its header, body, shapes and parts. Refused: another magic or version, B or D entries, any of a
@@ -221,88 +231,119 @@ pub fn read(d: &[u8]) -> Result<PhysicsResource> {
     }
     let (word08, nparts, nb, nshapes, nd) = (
         r.u32le(8)?,
-        r.u32le(0xC)? as usize,
+        r.size32le(0xC)?,
         r.u32le(0x10)?,
-        r.u32le(0x18)? as usize,
+        r.size32le(0x18)?,
         r.u32le(0x1C)?,
     );
     if nb != 0 || nd != 0 || r.u32le(0x14)? != 0 || r.u32le(0x20)? != 0 {
         return Err(bad(W, 0x10, format!("{nb} B and {nd} D entries (none read yet)")));
     }
-    let p: Vec<usize> = (0..5).map(|k| rel(&r, 0x24 + 4 * k)).collect::<Result<_>>()?;
-    if p[0] != BODY
-        || p[1] < BODY
-        || p[2] != p[1] + SHAPE * nshapes
-        || p[3] != p[2]
-        || p[4] != p[3] + PART * nparts
-        || p[4] > d.len()
+    let mut tables = [0usize; 5];
+    for (k, t) in tables.iter_mut().enumerate() {
+        *t = rel(&r, crate::at(0x24, k, 4))?;
+    }
+    let [body_at, shape_at, d_at, part_at, end] = tables;
+    if body_at != BODY
+        || shape_at < BODY
+        || d_at != crate::at(shape_at, nshapes, SHAPE)
+        || part_at != d_at
+        || end != crate::at(part_at, nparts, PART)
+        || end > d.len()
     {
         return Err(bad(W, 0x24, "table offsets do not match the counts"));
     }
-    let body = r.bytes(BODY, p[1] - BODY)?.to_vec();
+    let body = r.bytes(BODY, shape_at.saturating_sub(BODY))?.to_vec();
     let mut shapes = Vec::with_capacity(capacity(W, nshapes, SHAPE, d.len())?);
     for i in 0..nshapes {
-        let s = p[1] + SHAPE * i;
-        let nv = r.u16le(s + 0x18)? as usize;
-        let nc = r.u16le(s + 0x1A)? as usize;
-        let slot = |k: usize| rel(&r, s + 0x24 + 4 * k);
-        let sl: Vec<usize> = (0..12).map(slot).collect::<Result<_>>()?;
-        if sl[8] != 0 || sl[9] != 0 || r.u32le(s + 0x20)? != 0 {
+        let s = crate::at(shape_at, i, SHAPE);
+        let at_s = |k: usize| s.saturating_add(k);
+        let nv = usize::from(r.u16le(at_s(0x18))?);
+        let nc = usize::from(r.u16le(at_s(0x1A))?);
+        let mut slots = [0usize; 12];
+        for (k, t) in slots.iter_mut().enumerate() {
+            *t = rel(&r, at_s(crate::at(0x24, k, 4)))?;
+        }
+        let [
+            vertices_at,
+            vertex_offsets_at,
+            corner_ids_at,
+            corner_vertices_at,
+            edge_values_at,
+            concave_at,
+            flat_at,
+            face_offsets_at,
+            unused8,
+            unused9,
+            planes_at,
+            tree_at,
+        ] = slots;
+        if unused8 != 0 || unused9 != 0 || r.u32le(at_s(0x20))? != 0 {
             return Err(bad(W, s, "a shape slot read nowhere yet is set"));
         }
         let vertices = (0..nv)
-            .map(|v| f32s3(&r, sl[0] + 12 * v))
+            .map(|v| f32s3(&r, crate::at(vertices_at, v, 12)))
             .collect::<Result<Vec<_>>>()?;
-        let corners = u16s(&r, sl[3], nc)?;
-        // faces in the low half, tree nodes in the high half
-        let packed = r.u32le(s + 0x1C)?;
-        let (nf, nodes) = ((packed & 0xFFFF) as usize, (packed >> 16) as usize);
-        let faces = u16s(&r, sl[7], nf + 1)?;
+        let corners = u16s(&r, corner_vertices_at, nc)?;
+        // faces in the low half of the word, tree nodes in the high half
+        let (nf, nodes) = (
+            usize::from(r.u16le(at_s(0x1C))?),
+            usize::from(r.u16le(at_s(0x1E))?),
+        );
+        let faces = u16s(&r, face_offsets_at, nf.saturating_add(1))?;
         if faces.first() != Some(&0)
-            || faces.last().map(|&l| l as usize) != Some(nc)
-            || faces
-                .windows(2)
-                .any(|w| usize::from(w[1]) < usize::from(w[0]) + 3)
+            || faces.last().map(|&l| usize::from(l)) != Some(nc)
+            || faces.windows(2).any(|w| match w {
+                [a, b] => usize::from(*b) < usize::from(*a).saturating_add(3),
+                _ => true,
+            })
         {
             return Err(bad(
                 W,
-                sl[7],
+                face_offsets_at,
                 "face offsets do not run from 0 to the corners in steps of at least 3",
             ));
         }
-        if corners.iter().any(|&v| v as usize >= nv) {
-            return Err(bad(W, sl[3], "a corner names a vertex past the vertices"));
+        if corners.iter().any(|&v| usize::from(v) >= nv) {
+            return Err(bad(
+                W,
+                corner_vertices_at,
+                "a corner names a vertex past the vertices",
+            ));
         }
-        let edges = if sl[4] != 0 {
+        let edges = if edge_values_at != 0 {
             (0..nc)
                 .map(|c| {
                     Ok(Edge {
-                        value: f32::from_bits(r.u32le(sl[4] + 4 * c)?),
-                        concave: bit(&r, sl[5], c)?,
-                        flat: bit(&r, sl[6], c)?,
+                        value: f32::from_bits(r.u32le(crate::at(edge_values_at, c, 4))?),
+                        concave: bit(&r, concave_at, c)?,
+                        flat: bit(&r, flat_at, c)?,
                     })
                 })
                 .collect::<Result<Vec<_>>>()?
         } else {
             Vec::new()
         };
-        if (sl[11] != 0) != (nodes != 0) || (nodes != 0 && nodes + 1 != nf) {
-            return Err(bad(W, s + 0x1C, format!("{nodes} tree nodes for {nf} faces")));
+        if (tree_at != 0) != (nodes != 0) || (nodes != 0 && nodes.saturating_add(1) != nf) {
+            return Err(bad(W, at_s(0x1C), format!("{nodes} tree nodes for {nf} faces")));
         }
-        let tree = if sl[11] != 0 {
+        let tree = if tree_at != 0 {
             (0..nodes)
-                .map(|k| r.u64le(sl[11] + 8 * k))
+                .map(|k| r.u64le(crate::at(tree_at, k, 8)))
                 .collect::<Result<Vec<_>>>()?
         } else {
             Vec::new()
         };
-        let planes = if sl[10] != 0 {
+        let planes = if planes_at != 0 {
             (0..nf)
                 .map(|f| {
-                    let o = sl[10] + 8 * f;
+                    let o = crate::at(planes_at, f, 8);
                     Ok(Plane {
-                        normal: [r.u16le(o)? as i16, r.u16le(o + 2)? as i16],
-                        offset: f32::from_bits(r.u32le(o + 4)?),
+                        normal: [
+                            i16::from_le_bytes(r.arr(o)?),
+                            i16::from_le_bytes(r.arr(o.saturating_add(2))?),
+                        ],
+                        offset: f32::from_bits(r.u32le(o.saturating_add(4))?),
                     })
                 })
                 .collect::<Result<Vec<_>>>()?
@@ -311,7 +352,7 @@ pub fn read(d: &[u8]) -> Result<PhysicsResource> {
         };
         let shape = Shape {
             min: f32s3(&r, s)?,
-            max: f32s3(&r, s + 12)?,
+            max: f32s3(&r, at_s(12))?,
             vertices,
             faces,
             corners,
@@ -320,10 +361,12 @@ pub fn read(d: &[u8]) -> Result<PhysicsResource> {
             planes,
         };
         let (offsets, ids) = shape.corner_index();
-        if u16s(&r, sl[1], nv + 1)? != offsets || u16s(&r, sl[2], nc)? != ids {
+        if u16s(&r, vertex_offsets_at, nv.saturating_add(1))? != offsets
+            || u16s(&r, corner_ids_at, nc)? != ids
+        {
             return Err(bad(
                 W,
-                sl[1],
+                vertex_offsets_at,
                 "the vertex -> corner index disagrees with the faces",
             ));
         }
@@ -331,20 +374,21 @@ pub fn read(d: &[u8]) -> Result<PhysicsResource> {
     }
     let mut parts = Vec::with_capacity(nparts);
     for i in 0..nparts {
-        let o = p[3] + PART * i;
-        let f = |k: usize| -> Result<f32> { Ok(f32::from_bits(r.u32le(o + k)?)) };
+        let o = crate::at(part_at, i, PART);
+        let word = |k: usize| r.u32le(o.saturating_add(k));
+        let f = |k: usize| -> Result<f32> { Ok(f32::from_bits(word(k)?)) };
         parts.push(Part {
             rotation: [f(0)?, f(4)?, f(8)?, f(0xC)?],
             position: [f(0x10)?, f(0x14)?, f(0x18)?],
             w: f(0x1C)?,
-            word20: r.u32le(o + 0x20)?,
-            kind: r.u32le(o + 0x24)?,
-            ids: [r.u32le(o + 0x28)?, r.u32le(o + 0x2C)?, r.u32le(o + 0x30)?],
-            word34: r.u32le(o + 0x34)?,
-            shape: r.u32le(o + 0x38)?,
-            word3c: r.u32le(o + 0x3C)?,
-            material: r.u32le(o + 0x40)?,
-            flags: r.u32le(o + 0x44)?,
+            word20: word(0x20)?,
+            kind: word(0x24)?,
+            ids: [word(0x28)?, word(0x2C)?, word(0x30)?],
+            word34: word(0x34)?,
+            shape: word(0x38)?,
+            word3c: word(0x3C)?,
+            material: word(0x40)?,
+            flags: word(0x44)?,
         });
     }
     Ok(PhysicsResource {
@@ -356,23 +400,44 @@ pub fn read(d: &[u8]) -> Result<PhysicsResource> {
     })
 }
 
-fn put_u32(out: &mut [u8], at: usize, v: u32) {
-    out[at..at + 4].copy_from_slice(&v.to_le_bytes());
+/// Writes `v` at `at` of the resource being built.
+fn put(out: &mut [u8], at: usize, v: &[u8]) -> Result<()> {
+    let total = out.len();
+    at.checked_add(v.len())
+        .and_then(|end| out.get_mut(at..end))
+        .ok_or_else(|| {
+            bad(
+                W,
+                at,
+                format!("{} bytes past the end of the {total}-byte resource", v.len()),
+            )
+        })?
+        .copy_from_slice(v);
+    Ok(())
+}
+
+fn put_u32(out: &mut [u8], at: usize, v: u32) -> Result<()> {
+    put(out, at, &v.to_le_bytes())
+}
+
+/// `n` as a u16 field; an error when it does not fit.
+fn u16_len(n: usize) -> Result<u16> {
+    u16::try_from(n).map_err(|_| bad(W, 0, format!("{n} does not fit a 16-bit field")))
 }
 
 /// The resource written in the layout of the module documentation (the order Studio's writer and the game's own
 /// resources use). Refused: a shape past the u16 limits, edge data for some corners only, a tree of the wrong size, a
-/// part naming a missing shape.
+/// part naming a missing shape, a resource past the 32-bit offsets.
 pub fn write(p: &PhysicsResource) -> Result<Vec<u8>> {
     for (i, s) in p.shapes.iter().enumerate() {
         let nf = s.face_count();
-        if s.vertices.len() > MAX_U16 || s.corners.len() > MAX_U16 || nf == 0 {
+        if s.vertices.len() > MAX_U16 || s.corners.len() > MAX_U16 || nf == 0 || nf > MAX_U16 {
             return Err(bad(W, i, "a shape holds no face or more than u16 storage"));
         }
         if !(s.edges.is_empty() || s.edges.len() == s.corners.len()) {
             return Err(bad(W, i, "edge data for some corners only"));
         }
-        if !(s.tree.is_empty() || s.tree.len() == nf - 1) {
+        if !(s.tree.is_empty() || s.tree.len() == nf.saturating_sub(1)) {
             return Err(bad(W, i, format!("{} tree nodes for {nf} faces", s.tree.len())));
         }
         if !(s.planes.is_empty() || s.planes.len() == nf) {
@@ -382,66 +447,94 @@ pub fn write(p: &PhysicsResource) -> Result<Vec<u8>> {
     if let Some(part) = p
         .parts
         .iter()
-        .find(|q| q.shape != NO_SHAPE && q.shape as usize >= p.shapes.len())
+        .find(|q| q.shape != NO_SHAPE && usize::try_from(q.shape).map_or(true, |i| i >= p.shapes.len()))
     {
         return Err(bad(
             W,
-            part.shape as usize,
+            usize::try_from(part.shape).unwrap_or(usize::MAX),
             "a part names a shape past the shapes",
         ));
     }
-    let shape_at = BODY + p.body.len();
-    let part_at = shape_at + SHAPE * p.shapes.len();
-    let end = part_at + PART * p.parts.len();
+    let too_big = || bad(W, 0, "the resource does not fit the 32-bit offsets");
+    let shape_at = BODY.checked_add(p.body.len()).ok_or_else(too_big)?;
+    let part_at = p
+        .shapes
+        .len()
+        .checked_mul(SHAPE)
+        .and_then(|n| shape_at.checked_add(n))
+        .ok_or_else(too_big)?;
+    let end = p
+        .parts
+        .len()
+        .checked_mul(PART)
+        .and_then(|n| part_at.checked_add(n))
+        .ok_or_else(too_big)?;
     let mut out = vec![0u8; end];
-    put_u32(&mut out, 0, p.version);
-    put_u32(&mut out, 4, MAGIC);
-    put_u32(&mut out, 8, p.word08);
-    put_u32(&mut out, 0xC, p.parts.len() as u32);
-    put_u32(&mut out, 0x18, p.shapes.len() as u32);
+    put_u32(&mut out, 0, p.version)?;
+    put_u32(&mut out, 4, MAGIC)?;
+    put_u32(&mut out, 8, p.word08)?;
+    put_u32(&mut out, 0xC, u32_len(W, p.parts.len())?)?;
+    put_u32(&mut out, 0x18, u32_len(W, p.shapes.len())?)?;
     for (k, target) in [BODY, shape_at, part_at, part_at, end].into_iter().enumerate() {
-        let at = 0x24 + 4 * k;
-        put_u32(&mut out, at, (target - at) as u32);
+        let at = crate::at(0x24, k, 4);
+        put_u32(&mut out, at, u32_len(W, target.saturating_sub(at))?)?;
     }
-    out[BODY..shape_at].copy_from_slice(&p.body);
+    put(&mut out, BODY, &p.body)?;
     for (i, s) in p.shapes.iter().enumerate() {
-        let o = shape_at + SHAPE * i;
+        let o = crate::at(shape_at, i, SHAPE);
         for (k, v) in s.min.iter().chain(&s.max).enumerate() {
-            put_u32(&mut out, o + 4 * k, v.to_bits());
+            put_u32(&mut out, crate::at(o, k, 4), v.to_bits())?;
         }
-        out[o + 0x18..o + 0x1A].copy_from_slice(&(s.vertices.len() as u16).to_le_bytes());
-        out[o + 0x1A..o + 0x1C].copy_from_slice(&(s.corners.len() as u16).to_le_bytes());
-        put_u32(
+        put(
             &mut out,
-            o + 0x1C,
-            s.face_count() as u32 | (s.tree.len() as u32) << 16,
-        );
+            o.saturating_add(0x18),
+            &u16_len(s.vertices.len())?.to_le_bytes(),
+        )?;
+        put(
+            &mut out,
+            o.saturating_add(0x1A),
+            &u16_len(s.corners.len())?.to_le_bytes(),
+        )?;
+        // faces in the low half of the word, tree nodes in the high half
+        put(
+            &mut out,
+            o.saturating_add(0x1C),
+            &u16_len(s.face_count())?.to_le_bytes(),
+        )?;
+        put(
+            &mut out,
+            o.saturating_add(0x1E),
+            &u16_len(s.tree.len())?.to_le_bytes(),
+        )?;
     }
     for (i, q) in p.parts.iter().enumerate() {
-        let o = part_at + PART * i;
+        let o = crate::at(part_at, i, PART);
         for (k, v) in q.rotation.iter().chain(&q.position).chain([&q.w]).enumerate() {
-            put_u32(&mut out, o + 4 * k, v.to_bits());
+            put_u32(&mut out, crate::at(o, k, 4), v.to_bits())?;
         }
+        let [id0, id1, id2] = q.ids;
         for (at, v) in [
             (0x20, q.word20),
             (0x24, q.kind),
-            (0x28, q.ids[0]),
-            (0x2C, q.ids[1]),
-            (0x30, q.ids[2]),
+            (0x28, id0),
+            (0x2C, id1),
+            (0x30, id2),
             (0x34, q.word34),
             (0x38, q.shape),
             (0x3C, q.word3c),
             (0x40, q.material),
             (0x44, q.flags),
         ] {
-            put_u32(&mut out, o + at, v);
+            put_u32(&mut out, o.saturating_add(at), v)?;
         }
     }
-    let slot = |i: usize, k: usize| shape_at + SHAPE * i + 0x24 + 4 * k;
-    let place = |out: &mut Vec<u8>, field: usize, data: &[u8]| {
-        let at = out.len() - field;
-        put_u32(out, field, at as u32);
+    let slot = |i: usize, k: usize| crate::at(crate::at(shape_at, i, SHAPE).saturating_add(0x24), k, 4);
+    // Appends `data` and stores its self-relative offset in `field`.
+    let place = |out: &mut Vec<u8>, field: usize, data: &[u8]| -> Result<()> {
+        let at = u32_len(W, out.len().saturating_sub(field))?;
+        put_u32(out, field, at)?;
         out.extend_from_slice(data);
+        Ok(())
     };
     let le16 = |v: &[u16]| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
     let index: Vec<(Vec<u16>, Vec<u16>)> = p.shapes.iter().map(Shape::corner_index).collect();
@@ -452,28 +545,31 @@ pub fn write(p: &PhysicsResource) -> Result<Vec<u8>> {
             .flatten()
             .flat_map(|x| x.to_bits().to_le_bytes())
             .collect();
-        place(&mut out, slot(i, 0), &v);
+        place(&mut out, slot(i, 0), &v)?;
     }
     for (i, (offsets, _)) in index.iter().enumerate() {
-        place(&mut out, slot(i, 1), &le16(offsets));
+        place(&mut out, slot(i, 1), &le16(offsets))?;
     }
     for (i, (_, ids)) in index.iter().enumerate() {
-        place(&mut out, slot(i, 2), &le16(ids));
+        place(&mut out, slot(i, 2), &le16(ids))?;
     }
     for (i, s) in p.shapes.iter().enumerate() {
-        place(&mut out, slot(i, 3), &le16(&s.corners));
+        place(&mut out, slot(i, 3), &le16(&s.corners))?;
     }
     if p.shapes.iter().any(|s| !s.edges.is_empty()) {
         out.resize(crate::align(out.len(), 4), 0);
     }
+    // 32 flags to a little-endian word, the first flag its lowest bit
     let bits = |flags: Vec<bool>| {
-        let mut w = vec![0u32; flags.len().div_ceil(32)];
-        for (i, f) in flags.into_iter().enumerate() {
-            if f {
-                w[i / 32] |= 1 << (i % 32);
-            }
-        }
-        w.into_iter().flat_map(u32::to_le_bytes).collect::<Vec<u8>>()
+        flags
+            .chunks(32)
+            .flat_map(|c| {
+                c.iter()
+                    .rev()
+                    .fold(0u32, |w, &f| w.wrapping_shl(1) | u32::from(f))
+                    .to_le_bytes()
+            })
+            .collect::<Vec<u8>>()
     };
     for (i, s) in p.shapes.iter().enumerate() {
         if s.edges.is_empty() {
@@ -484,20 +580,20 @@ pub fn write(p: &PhysicsResource) -> Result<Vec<u8>> {
             .iter()
             .flat_map(|e| e.value.to_bits().to_le_bytes())
             .collect();
-        place(&mut out, slot(i, 4), &values);
+        place(&mut out, slot(i, 4), &values)?;
         place(
             &mut out,
             slot(i, 5),
             &bits(s.edges.iter().map(|e| e.concave).collect()),
-        );
+        )?;
         place(
             &mut out,
             slot(i, 6),
             &bits(s.edges.iter().map(|e| e.flat).collect()),
-        );
+        )?;
     }
     for (i, s) in p.shapes.iter().enumerate() {
-        place(&mut out, slot(i, 7), &le16(&s.faces));
+        place(&mut out, slot(i, 7), &le16(&s.faces))?;
     }
     let planes = p.shapes.iter().any(|s| !s.planes.is_empty());
     if planes {
@@ -511,12 +607,13 @@ pub fn write(p: &PhysicsResource) -> Result<Vec<u8>> {
             .planes
             .iter()
             .flat_map(|q| {
-                let [a, b] = q.normal.map(i16::to_le_bytes);
-                let o = q.offset.to_bits().to_le_bytes();
-                [a[0], a[1], b[0], b[1], o[0], o[1], o[2], o[3]]
+                let [a0, a1] = q.normal[0].to_le_bytes();
+                let [b0, b1] = q.normal[1].to_le_bytes();
+                let [o0, o1, o2, o3] = q.offset.to_bits().to_le_bytes();
+                [a0, a1, b0, b1, o0, o1, o2, o3]
             })
             .collect();
-        place(&mut out, slot(i, 10), &bytes);
+        place(&mut out, slot(i, 10), &bytes)?;
     }
     let planes_end = out.len();
     if p.shapes.iter().any(|s| !s.tree.is_empty()) {
@@ -526,13 +623,13 @@ pub fn write(p: &PhysicsResource) -> Result<Vec<u8>> {
                 continue;
             }
             let nodes: Vec<u8> = s.tree.iter().flat_map(|n| n.to_le_bytes()).collect();
-            place(&mut out, slot(i, 11), &nodes);
+            place(&mut out, slot(i, 11), &nodes)?;
         }
         out.extend_from_slice(&[0u8; 8]);
     }
     // the resource runs at least 56 bytes past the planes
-    if planes && out.len() < planes_end + 56 {
-        out.resize(planes_end + 56, 0);
+    if planes && out.len() < planes_end.saturating_add(56) {
+        out.resize(planes_end.saturating_add(56), 0);
     }
     Ok(out)
 }
@@ -554,6 +651,15 @@ pub struct Welded {
     pub repeated: usize,
 }
 
+/// The position vertex `i` names, or the error for an index outside the vertex buffer.
+fn position(positions: &[[f32; 3]], i: u32) -> Result<[f32; 3]> {
+    let at = usize::try_from(i).unwrap_or(usize::MAX);
+    positions
+        .get(at)
+        .copied()
+        .ok_or_else(|| bad(W, at, "collision index is outside the vertex buffer"))
+}
+
 /// `triangles` of `positions` welded (see [`Welded`]). An index past the positions or a position that is not finite is
 /// an error.
 pub fn weld(positions: &[[f32; 3]], triangles: &[[u32; 3]]) -> Result<Welded> {
@@ -568,29 +674,34 @@ pub fn weld(positions: &[[f32; 3]], triangles: &[[u32; 3]]) -> Result<Welded> {
     let mut seen: HashSet<[u32; 3]> = HashSet::new();
     for (t, tri) in triangles.iter().enumerate() {
         let mut ids = [0u32; 3];
-        for (k, &i) in tri.iter().enumerate() {
-            let p = *positions
-                .get(i as usize)
-                .ok_or_else(|| bad(W, t, "collision index is outside the vertex buffer"))?;
+        for (id, &i) in ids.iter_mut().zip(tri) {
+            let p = position(positions, i)
+                .map_err(|_| bad(W, t, "collision index is outside the vertex buffer"))?;
             if p.iter().any(|c| !c.is_finite()) {
                 return Err(bad(W, t, "collision vertex is not finite"));
             }
             // -0.0 and 0.0 are one position
             let key = p.map(|c| if c == 0.0 { 0 } else { c.to_bits() });
-            let next = w.positions.len() as u32;
-            ids[k] = *by_pos.entry(key).or_insert_with(|| {
+            let next = u32_len(W, w.positions.len())?;
+            *id = *by_pos.entry(key).or_insert_with(|| {
                 w.positions.push(p);
                 next
             });
         }
-        if ids[0] == ids[1] || ids[1] == ids[2] || ids[0] == ids[2] || area2(&w.positions, ids) <= 0.0 {
-            w.degenerate += 1;
+        let [a, b, c] = ids;
+        let [pa, pb, pc] = ids.map(|i| position(&w.positions, i));
+        if a == b || b == c || a == c || area2([pa?, pb?, pc?]) <= 0.0 {
+            w.degenerate = w.degenerate.saturating_add(1);
             continue;
         }
-        let m = (0..3).min_by_key(|&k| ids[k]).unwrap_or(0);
-        let ids = [ids[m], ids[(m + 1) % 3], ids[(m + 2) % 3]];
+        let first = ids
+            .iter()
+            .enumerate()
+            .min_by_key(|&(_, &v)| v)
+            .map_or(0, |(k, _)| k);
+        ids.rotate_left(first);
         if !seen.insert(ids) {
-            w.repeated += 1;
+            w.repeated = w.repeated.saturating_add(1);
             continue;
         }
         w.triangles.push(ids);
@@ -599,21 +710,34 @@ pub fn weld(positions: &[[f32; 3]], triangles: &[[u32; 3]]) -> Result<Welded> {
     Ok(w)
 }
 
+fn sub3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    let ([a0, a1, a2], [b0, b1, b2]) = (a, b);
+    [a0 - b0, a1 - b1, a2 - b2]
+}
+
+fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+    let ([a0, a1, a2], [b0, b1, b2]) = (a, b);
+    a0 * b0 + a1 * b1 + a2 * b2
+}
+
 /// The length of the cross product of a triangle's edges, in f64 (Studio's area test).
-fn area2(p: &[[f32; 3]], t: [u32; 3]) -> f64 {
-    let a = p[t[0] as usize].map(f64::from);
-    let b = p[t[1] as usize].map(f64::from);
-    let c = p[t[2] as usize].map(f64::from);
-    let (u, v) = (
-        [b[0] - a[0], b[1] - a[1], b[2] - a[2]],
-        [c[0] - a[0], c[1] - a[1], c[2] - a[2]],
-    );
-    let x = [
-        u[1] * v[2] - u[2] * v[1],
-        u[2] * v[0] - u[0] * v[2],
-        u[0] * v[1] - u[1] * v[0],
-    ];
-    (x[0] * x[0] + x[1] * x[1] + x[2] * x[2]).sqrt()
+fn area2(t: [[f32; 3]; 3]) -> f64 {
+    let [a, b, c] = t.map(|p| p.map(f64::from));
+    let ([u0, u1, u2], [v0, v1, v2]) = (sub3(b, a), sub3(c, a));
+    let x = [u1 * v2 - u2 * v1, u2 * v0 - u0 * v2, u0 * v1 - u1 * v0];
+    dot(x, x).sqrt()
+}
+
+/// A computed measure as the `f32` the encoder stores.
+#[allow(clippy::cast_possible_truncation)] // rounds a computed f64 to f32; no stored bytes are narrowed
+fn narrow(v: f64) -> f32 {
+    v as f32
+}
+
+/// `v` as an index into `0..bins`, clamped.
+#[allow(clippy::cast_possible_truncation)] // a computed float clamped to a bin index of at most 1023
+fn bin(v: f64, bins: u32) -> u32 {
+    (v.floor() as i64).clamp(0, i64::from(bins.saturating_sub(1))) as u32
 }
 
 /// One shape of welded triangles (a batch: one material's triangles of a welded object, at most [`MAX_U16`] corners),
@@ -622,7 +746,7 @@ fn area2(p: &[[f32; 3]], t: [u32; 3]) -> f64 {
 /// use renumbered in first-use order, every corner's edge data ([`edges`]), and the tree with the faces in
 /// its leaf order. `None` when no triangle is left.
 pub fn mesh_shape(positions: &[[f32; 3]], triangles: &[[u32; 3]]) -> Result<Option<(Shape, [f32; 3])>> {
-    if triangles.len() * 3 > MAX_U16 {
+    if triangles.len() > MAX_U16 / 3 {
         return Err(bad(
             W,
             triangles.len(),
@@ -633,9 +757,7 @@ pub fn mesh_shape(positions: &[[f32; 3]], triangles: &[[u32; 3]]) -> Result<Opti
     let mut seen = HashSet::new();
     for t in triangles {
         for &v in t {
-            if positions.get(v as usize).is_none() {
-                return Err(bad(W, v as usize, "collision index is outside the vertex buffer"));
-            }
+            position(positions, v)?;
             if seen.insert(v) {
                 used.push(v);
             }
@@ -647,75 +769,95 @@ pub fn mesh_shape(positions: &[[f32; 3]], triangles: &[[u32; 3]]) -> Result<Opti
     // the middle of the used vertices' bounds, in f64 then f32
     let (mut lo, mut hi) = ([f64::MAX; 3], [f64::MIN; 3]);
     for &v in &used {
-        for a in 0..3 {
-            let c = f64::from(positions[v as usize][a]);
-            if c < lo[a] {
-                lo[a] = c;
+        for ((l, h), c) in lo.iter_mut().zip(&mut hi).zip(position(positions, v)?) {
+            let c = f64::from(c);
+            if c < *l {
+                *l = c;
             }
-            if hi[a] < c {
-                hi[a] = c;
+            if *h < c {
+                *h = c;
             }
         }
     }
-    let centre: [f32; 3] = std::array::from_fn(|a| ((lo[a] + hi[a]) * 0.5) as f32);
+    let mut centre = [0f32; 3];
+    for ((m, l), h) in centre.iter_mut().zip(lo).zip(hi) {
+        *m = narrow((l + h) * 0.5);
+    }
     if centre.iter().any(|c| !c.is_finite()) {
         return Err(bad(W, 0, "collision value is outside finite float32 range"));
     }
-    let local = |v: u32| -> [f32; 3] { std::array::from_fn(|a| positions[v as usize][a] - centre[a]) };
+    let local = |v: u32| -> Result<[f32; 3]> {
+        let [x, y, z] = position(positions, v)?;
+        let [cx, cy, cz] = centre;
+        Ok([x - cx, y - cy, z - cz])
+    };
     let mut remap: BTreeMap<u32, u16> = BTreeMap::new();
     let mut vertices: Vec<[f32; 3]> = Vec::new();
     let mut corners: Vec<u16> = Vec::new();
     for t in triangles {
-        let p = t.map(local);
-        let lp: Vec<[f32; 3]> = p.to_vec();
-        if area2(&lp, [0, 1, 2]) <= 0.0 {
+        let [a, b, c] = *t;
+        if area2([local(a)?, local(b)?, local(c)?]) <= 0.0 {
             continue;
         }
         for &v in t {
-            let next = vertices.len() as u16;
-            let id = *remap.entry(v).or_insert_with(|| {
-                vertices.push(local(v));
-                next
-            });
+            let id = match remap.get(&v) {
+                Some(&id) => id,
+                None => {
+                    let id = u16::try_from(vertices.len()).map_err(|_| {
+                        bad(
+                            W,
+                            vertices.len(),
+                            "collision geometry exceeds native uint16 storage",
+                        )
+                    })?;
+                    vertices.push(local(v)?);
+                    remap.insert(v, id);
+                    id
+                }
+            };
             corners.push(id);
         }
     }
     if corners.is_empty() {
         return Ok(None);
     }
-    if vertices.len() > MAX_U16 {
-        return Err(bad(
-            W,
-            vertices.len(),
-            "collision geometry exceeds native uint16 storage",
-        ));
-    }
-    let faces: Vec<u16> = (0..=corners.len() / 3).map(|f| (3 * f) as u16).collect();
+    let faces: Vec<u16> = (0..=corners.len() / 3)
+        .map(|f| u16_len(f.saturating_mul(3)))
+        .collect::<Result<_>>()?;
+    let spans = face_spans(&faces);
     let bounds = bounds_of(vertices.iter().copied());
-    let edge = edges(&vertices, &faces, &corners);
-    let nf = faces.len() - 1;
-    let (tree, order) = if nf > 1 {
-        let recs: Vec<FaceRecord> = (0..nf)
-            .map(|f| {
-                let ps: Vec<[f32; 3]> = corners[faces[f] as usize..faces[f + 1] as usize]
+    let edge = edges(&vertices, &faces, &corners)?;
+    let (tree, order) = if spans.len() > 1 {
+        let recs: Vec<FaceRecord> = spans
+            .iter()
+            .enumerate()
+            .map(|(f, &(a, b))| {
+                let ps: Vec<[f32; 3]> = corners
+                    .get(a..b)
+                    .ok_or_else(|| bad(W, a, "face past the corners"))?
                     .iter()
-                    .map(|&v| vertices[v as usize])
-                    .collect();
+                    .map(|&v| vertex(&vertices, v))
+                    .collect::<Result<_>>()?;
                 let n = ps.len() as f64;
-                FaceRecord {
+                let sum = ps.iter().fold([0f64; 3], |acc, p| {
+                    let ([a0, a1, a2], [p0, p1, p2]) = (acc, p.map(f64::from));
+                    [a0 + p0, a1 + p1, a2 + p2]
+                });
+                Ok(FaceRecord {
                     bounds: bounds_of(ps.iter().copied()),
-                    centroid: std::array::from_fn(|a| ps.iter().map(|p| f64::from(p[a])).sum::<f64>() / n),
-                    index: f as u32,
-                }
+                    centroid: sum.map(|x| x / n),
+                    index: u32_len(W, f)?,
+                })
             })
-            .collect();
+            .collect::<Result<_>>()?;
         tree(recs, bounds)?
     } else {
         (Vec::new(), vec![0u32])
     };
+    let [x0, y0, z0, x1, y1, z1] = bounds;
     let mut out = Shape {
-        min: [bounds[0], bounds[1], bounds[2]],
-        max: [bounds[3], bounds[4], bounds[5]],
+        min: [x0, y0, z0],
+        max: [x1, y1, z1],
         vertices,
         faces: vec![0],
         corners: Vec::with_capacity(corners.len()),
@@ -724,37 +866,70 @@ pub fn mesh_shape(positions: &[[f32; 3]], triangles: &[[u32; 3]]) -> Result<Opti
         planes: Vec::new(),
     };
     for f in order {
-        let f = f as usize;
-        for c in faces[f] as usize..faces[f + 1] as usize {
-            out.corners.push(corners[c]);
-            out.edges.push(edge[c]);
-        }
-        out.faces.push(out.corners.len() as u16);
+        let &(a, b) = usize::try_from(f)
+            .ok()
+            .and_then(|f| spans.get(f))
+            .ok_or_else(|| bad(W, 0, "tree leaf names no face"))?;
+        let (cs, es) = corners
+            .get(a..b)
+            .zip(edge.get(a..b))
+            .ok_or_else(|| bad(W, a, "face past the corners"))?;
+        out.corners.extend_from_slice(cs);
+        out.edges.extend_from_slice(es);
+        out.faces.push(u16_len(out.corners.len())?);
     }
     Ok(Some((out, centre)))
+}
+
+/// Each face's corner range `(first, end)` from its offsets.
+fn face_spans(faces: &[u16]) -> Vec<(usize, usize)> {
+    faces
+        .windows(2)
+        .filter_map(|w| match w {
+            [a, b] => Some((usize::from(*a), usize::from(*b))),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The position of vertex `v`, or the error for a corner that names none.
+fn vertex(vertices: &[[f32; 3]], v: u16) -> Result<[f32; 3]> {
+    vertices.get(usize::from(v)).copied().ok_or_else(|| {
+        bad(
+            W,
+            usize::from(v),
+            format!("a corner names vertex {v} of {}", vertices.len()),
+        )
+    })
 }
 
 /// min x, y, z, max x, y, z of the points; a tie keeps the earlier value (Studio's FUN_140158550 and FUN_140158400
 /// compare `<=` towards the kept one, which only matters for -0.0 against 0.0).
 fn bounds_of(points: impl Iterator<Item = [f32; 3]>) -> [f32; 6] {
     let mut b: Option<[f32; 6]> = None;
-    for p in points {
-        b = Some(match b {
-            None => [p[0], p[1], p[2], p[0], p[1], p[2]],
-            Some(mut b) => {
-                for a in 0..3 {
-                    if p[a] < b[a] {
-                        b[a] = p[a];
-                    }
-                    if b[3 + a] < p[a] {
-                        b[3 + a] = p[a];
-                    }
-                }
-                b
-            }
-        });
+    for [x, y, z] in points {
+        match &mut b {
+            None => b = Some([x, y, z, x, y, z]),
+            Some(b) => grow(b, [x, y, z, x, y, z]),
+        }
     }
     b.unwrap_or([0.0; 6])
+}
+
+/// `b` grown to hold `r` (boxes as min x, y, z, max x, y, z); a tie keeps `b`'s value.
+fn grow(b: &mut [f32; 6], r: [f32; 6]) {
+    let [bl0, bl1, bl2, bh0, bh1, bh2] = b;
+    let [rl0, rl1, rl2, rh0, rh1, rh2] = r;
+    for (kept, new) in [(bl0, rl0), (bl1, rl1), (bl2, rl2)] {
+        if new < *kept {
+            *kept = new;
+        }
+    }
+    for (kept, new) in [(bh0, rh0), (bh1, rh1), (bh2, rh2)] {
+        if *kept < new {
+            *kept = new;
+        }
+    }
 }
 
 /// Every corner's [`Edge`] (FUN_14015dcf0): a corner's edge runs from its vertex to the next corner's. When exactly
@@ -762,53 +937,86 @@ fn bounds_of(points: impl Iterator<Item = [f32; 3]>) -> [f32; 6] {
 /// normalised; neither may be zero) give `d`, their dot product clamped to [-1, 1]: the edge is flat when `d >=
 /// cos(0.1 deg)`; else, when the other face's centroid lies on or above this face's plane (through the corner's
 /// vertex), it is concave if `d > 0`; else (convex) its value is the cosine of half the angle, `cos(acos(d) / 2)`.
-/// Every other edge is [`Edge::OPEN`].
-pub fn edges(vertices: &[[f32; 3]], faces: &[u16], corners: &[u16]) -> Vec<Edge> {
-    let nf = faces.len().saturating_sub(1);
+/// Every other edge is [`Edge::OPEN`]. Refused: face offsets that do not run from 0 over every corner in order, a
+/// corner that names no vertex.
+pub fn edges(vertices: &[[f32; 3]], faces: &[u16], corners: &[u16]) -> Result<Vec<Edge>> {
     let nc = corners.len();
-    let mut face_of = vec![0usize; nc];
-    let mut next = vec![0usize; nc];
-    let mut normals = Vec::with_capacity(nf);
-    let mut centroids = Vec::with_capacity(nf);
-    for f in 0..nf {
-        let (a, b) = (faces[f] as usize, faces[f + 1] as usize);
-        let mut s = [0f64; 3];
-        for k in a..b {
-            face_of[k] = f;
-            next[k] = if k + 1 < b { k + 1 } else { a };
-            for (x, v) in s.iter_mut().zip(vertices[corners[k] as usize]) {
-                *x += f64::from(v);
-            }
+    let spans = face_spans(faces);
+    let mut cursor = faces.first().map_or(0, |&f| usize::from(f));
+    if cursor != 0 {
+        return Err(bad(W, 0, format!("face offsets start at corner {cursor}")));
+    }
+    for &(a, b) in &spans {
+        if a != cursor || b < a || b > nc {
+            return Err(bad(
+                W,
+                a,
+                format!("face offsets {a}..{b} do not follow on from corner {cursor} of {nc}"),
+            ));
         }
-        let n = (b - a) as f64;
+        cursor = b;
+    }
+    if cursor != nc {
+        return Err(bad(
+            W,
+            cursor,
+            format!("face offsets end at corner {cursor} of {nc}"),
+        ));
+    }
+    let mut face_of: Vec<usize> = Vec::with_capacity(nc);
+    // the vertices each corner's edge runs between
+    let mut ends: Vec<(u16, u16)> = Vec::with_capacity(nc);
+    let mut normals = Vec::with_capacity(spans.len());
+    let mut centroids = Vec::with_capacity(spans.len());
+    for (f, &(a, b)) in spans.iter().enumerate() {
+        let poly = corners.get(a..b).unwrap_or_default();
+        let mut s = [0f64; 3];
+        for &c in poly {
+            let [x, y, z] = vertex(vertices, c)?.map(f64::from);
+            let [s0, s1, s2] = s;
+            s = [s0 + x, s1 + y, s2 + z];
+        }
+        let n = poly.len() as f64;
         centroids.push(s.map(|x| x / n));
-        normals.push(newell(vertices, &corners[a..b]));
+        normals.push(newell(vertices, poly)?);
+        face_of.extend(poly.iter().map(|_| f));
+        ends.extend(
+            poly.iter()
+                .zip(poly.iter().cycle().skip(1))
+                .map(|(&a, &b)| (a, b)),
+        );
     }
     let mut holders: HashMap<(u16, u16), (usize, usize)> = HashMap::new();
-    for c in 0..nc {
-        let e = holders.entry((corners[c], corners[next[c]])).or_insert((c, 0));
-        e.1 += 1;
+    for (c, &e) in ends.iter().enumerate() {
+        let h = holders.entry(e).or_insert((c, 0));
+        h.1 = h.1.saturating_add(1);
     }
     let cos_flat = 0.001_745_329_251_994_329_6f64.cos();
-    (0..nc)
-        .map(|c| {
-            let (a, b) = (corners[c], corners[next[c]]);
+    // a corner's face's normal and centroid
+    let face_data = |c: usize| -> Result<([f64; 3], [f64; 3])> {
+        face_of
+            .get(c)
+            .and_then(|&f| normals.get(f).copied().zip(centroids.get(f).copied()))
+            .ok_or_else(|| bad(W, c, "a corner without a face"))
+    };
+    ends.iter()
+        .enumerate()
+        .map(|(c, &(a, b))| {
             if holders.get(&(a, b)).map(|h| h.1) != Some(1) {
-                return Edge::OPEN;
+                return Ok(Edge::OPEN);
             }
             let Some(&(o, 1)) = holders.get(&(b, a)) else {
-                return Edge::OPEN;
+                return Ok(Edge::OPEN);
             };
-            let (n1, n2) = (normals[face_of[c]], normals[face_of[o]]);
+            let ((n1, _), (n2, c2)) = (face_data(c)?, face_data(o)?);
             if dot(n1, n1).sqrt() == 0.0 || dot(n2, n2).sqrt() == 0.0 {
-                return Edge::OPEN;
+                return Ok(Edge::OPEN);
             }
             let d = dot(n1, n2).clamp(-1.0, 1.0);
             let flat = cos_flat <= d;
-            let va = vertices[a as usize].map(f64::from);
-            let c2 = centroids[face_of[o]];
-            let above = (c2[1] - va[1]) * n1[1] + (c2[0] - va[0]) * n1[0] + (c2[2] - va[2]) * n1[2] >= 0.0;
-            if flat {
+            let va = vertex(vertices, a)?.map(f64::from);
+            let above = dot(sub3(c2, va), n1) >= 0.0;
+            Ok(if flat {
                 Edge {
                     value: 1.0,
                     concave: false,
@@ -822,32 +1030,27 @@ pub fn edges(vertices: &[[f32; 3]], faces: &[u16], corners: &[u16]) -> Vec<Edge>
                 }
             } else {
                 Edge {
-                    value: (d.acos() * 0.5).cos() as f32,
+                    value: narrow((d.acos() * 0.5).cos()),
                     concave: false,
                     flat: false,
                 }
-            }
+            })
         })
         .collect()
 }
 
-fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
 /// A polygon's unit normal by Newell's method in f64 (FUN_14015ef10), zero when it has no area.
-fn newell(vertices: &[[f32; 3]], poly: &[u16]) -> [f64; 3] {
-    let n = poly.len();
+fn newell(vertices: &[[f32; 3]], poly: &[u16]) -> Result<[f64; 3]> {
     let (mut x, mut y, mut z) = (0f64, 0f64, 0f64);
-    for i in 0..n {
-        let a = vertices[poly[i] as usize].map(f64::from);
-        let b = vertices[poly[(i + 1) % n] as usize].map(f64::from);
-        z += (a[0] - b[0]) * (b[1] + a[1]);
-        x += (a[1] - b[1]) * (b[2] + a[2]);
-        y += (a[2] - b[2]) * (b[0] + a[0]);
+    for (&i, &j) in poly.iter().zip(poly.iter().cycle().skip(1)) {
+        let [a0, a1, a2] = vertex(vertices, i)?.map(f64::from);
+        let [b0, b1, b2] = vertex(vertices, j)?.map(f64::from);
+        z += (a0 - b0) * (b1 + a1);
+        x += (a1 - b1) * (b2 + a2);
+        y += (a2 - b2) * (b0 + a0);
     }
     let l = (x * x + y * y + z * z).sqrt();
-    if l <= 0.0 { [0.0; 3] } else { [x / l, y / l, z / l] }
+    Ok(if l <= 0.0 { [0.0; 3] } else { [x / l, y / l, z / l] })
 }
 
 // ---- the tree (FUN_140158700, FUN_14015c4b0, FUN_14015b6b0, FUN_14015f0f0) ------------------------------------------
@@ -870,33 +1073,33 @@ fn order_f64(a: f64, b: f64) -> std::cmp::Ordering {
     }
 }
 
-fn union(recs: &[FaceRecord]) -> [f32; 6] {
-    let mut b = recs[0].bounds;
-    for r in &recs[1..] {
-        for a in 0..3 {
-            if r.bounds[a] < b[a] {
-                b[a] = r.bounds[a];
-            }
-            if b[3 + a] < r.bounds[3 + a] {
-                b[3 + a] = r.bounds[3 + a];
-            }
-        }
+/// The box holding every record's.
+fn union(recs: &[FaceRecord]) -> Result<[f32; 6]> {
+    let (first, rest) = recs
+        .split_first()
+        .ok_or_else(|| bad(W, 0, "a tree node without faces"))?;
+    let mut b = first.bounds;
+    for r in rest {
+        grow(&mut b, r.bounds);
     }
-    b
+    Ok(b)
 }
 
 /// How many leaves the left child of heap node `i` holds in a complete binary tree whose `n` leaves are nodes
 /// `n - 1 ..= 2n - 2`.
 fn left_leaves(i: usize, n: usize) -> usize {
-    let (first, last) = (n - 1, 2 * n - 2);
-    let (mut lo, mut width, mut count) = (2 * i + 1, 1usize, 0usize);
+    let (first, last) = (n.saturating_sub(1), n.saturating_mul(2).saturating_sub(2));
+    let (mut lo, mut width, mut count) = (i.saturating_mul(2).saturating_add(1), 1usize, 0usize);
     while lo <= last {
-        let (a, b) = (lo.max(first), (lo + width - 1).min(last));
+        let (a, b) = (
+            lo.max(first),
+            lo.saturating_add(width).saturating_sub(1).min(last),
+        );
         if a <= b {
-            count += b - a + 1;
+            count = count.saturating_add(b.saturating_sub(a)).saturating_add(1);
         }
-        lo = lo * 2 + 1;
-        width *= 2;
+        lo = lo.saturating_mul(2).saturating_add(1);
+        width = width.saturating_mul(2);
     }
     count
 }
@@ -909,50 +1112,86 @@ fn left_leaves(i: usize, n: usize) -> usize {
 /// the nodes and the faces in leaf order.
 fn tree(recs: Vec<FaceRecord>, root: [f32; 6]) -> Result<(Vec<u64>, Vec<u32>)> {
     let n = recs.len();
-    let mut nodes = vec![0u64; n - 1];
+    let inner = n.saturating_sub(1);
+    let mut nodes = vec![0u64; inner];
     let mut order = vec![0u32; n];
     let mut stack = vec![(0usize, recs, root)];
     while let Some((i, mut faces, parent)) = stack.pop() {
-        if i >= n - 1 {
-            order[i - (n - 1)] = faces[0].index;
+        if i >= inner {
+            let (face, slot) = faces
+                .first()
+                .zip(order.get_mut(i.saturating_sub(inner)))
+                .ok_or_else(|| bad(W, i, "a tree leaf outside the leaf order"))?;
+            *slot = face.index;
             continue;
         }
         let nl = left_leaves(i, n);
-        let spread: [f64; 3] = std::array::from_fn(|a| {
-            let (mut lo, mut hi) = (f64::MAX, f64::MIN);
-            for f in &faces {
-                lo = lo.min(f.centroid[a]);
-                hi = hi.max(f.centroid[a]);
+        if nl > faces.len() {
+            return Err(bad(
+                W,
+                i,
+                format!("node {i} splits off {nl} of {} faces", faces.len()),
+            ));
+        }
+        let (mut lo, mut hi) = ([f64::MAX; 3], [f64::MIN; 3]);
+        for f in &faces {
+            for ((l, h), c) in lo.iter_mut().zip(&mut hi).zip(f.centroid) {
+                *l = l.min(c);
+                *h = h.max(c);
             }
-            hi - lo
-        });
-        let mut axis = usize::from(spread[0] < spread[1]);
-        if spread[axis] < spread[2] {
+        }
+        let ([l0, l1, l2], [h0, h1, h2]) = (lo, hi);
+        let (s0, s1, s2) = (h0 - l0, h1 - l1, h2 - l2);
+        let (mut axis, widest) = if s0 < s1 { (1, s1) } else { (0, s0) };
+        if widest < s2 {
             axis = 2;
         }
+        let along = |f: &FaceRecord| {
+            let [x, y, z] = f.centroid;
+            match axis {
+                0 => x,
+                1 => y,
+                _ => z,
+            }
+        };
+        let min_x = |f: &FaceRecord| {
+            let [x, ..] = f.bounds;
+            f64::from(x)
+        };
         faces.sort_by(|a, b| {
-            order_f64(a.centroid[axis], b.centroid[axis])
-                .then(order_f64(f64::from(a.bounds[0]), f64::from(b.bounds[0])))
+            order_f64(along(a), along(b))
+                .then(order_f64(min_x(a), min_x(b)))
                 .then(a.index.cmp(&b.index))
         });
-        let (mut lb, mut rb) = (union(&faces[..nl]), union(&faces[nl..]));
-        if rb[0] < lb[0] {
-            let k = faces.len() - nl;
+        let halves = |faces: &[FaceRecord]| -> Result<([f32; 6], [f32; 6])> {
+            let (l, r) = faces
+                .split_at_checked(nl)
+                .ok_or_else(|| bad(W, i, "node split past its faces"))?;
+            Ok((union(l)?, union(r)?))
+        };
+        let low_x = |b: [f32; 6]| {
+            let [x, ..] = b;
+            x
+        };
+        let (mut lb, mut rb) = halves(&faces)?;
+        if low_x(rb) < low_x(lb) {
+            let k = faces.len().saturating_sub(nl);
             faces.rotate_left(k);
-            (lb, rb) = (union(&faces[..nl]), union(&faces[nl..]));
-            if rb[0] < lb[0] {
-                faces.sort_by(|a, b| {
-                    order_f64(f64::from(a.bounds[0]), f64::from(b.bounds[0])).then(a.index.cmp(&b.index))
-                });
-                (lb, rb) = (union(&faces[..nl]), union(&faces[nl..]));
+            (lb, rb) = halves(&faces)?;
+            if low_x(rb) < low_x(lb) {
+                faces.sort_by(|a, b| order_f64(min_x(a), min_x(b)).then(a.index.cmp(&b.index)));
+                (lb, rb) = halves(&faces)?;
             }
         }
         let w = node(parent, lb, rb)?;
-        nodes[i] = w;
+        *nodes
+            .get_mut(i)
+            .ok_or_else(|| bad(W, i, "a tree node past the nodes"))? = w;
         let (dl, dr) = decode_node(parent, w);
         let right = faces.split_off(nl);
-        stack.push((2 * i + 2, right, dr));
-        stack.push((2 * i + 1, faces, dl));
+        let child = i.saturating_mul(2);
+        stack.push((child.saturating_add(2), right, dr));
+        stack.push((child.saturating_add(1), faces, dl));
     }
     Ok((nodes, order))
 }
@@ -960,7 +1199,7 @@ fn tree(recs: Vec<FaceRecord>, root: [f32; 6]) -> Result<(Vec<u64>, Vec<u32>)> {
 /// `v`'s plane in `bins` steps of `lo..hi`, from `lo` (a min plane, rounded down) or from `hi` (a max plane): the
 /// largest step whose plane does not cut into the box it bounds (FUN_14015f0f0).
 fn quantise(lo: f32, hi: f32, v: f32, bins: u32, from_max: bool) -> u32 {
-    let step = ((f64::from(hi) - f64::from(lo)) as f32) / bins as f32;
+    let step = narrow(f64::from(hi) - f64::from(lo)) / bins as f32;
     if step <= 0.0 {
         return 0;
     }
@@ -969,17 +1208,18 @@ fn quantise(lo: f32, hi: f32, v: f32, bins: u32, from_max: bool) -> u32 {
     } else {
         f64::from(v) - f64::from(lo)
     };
-    let mut q = ((d / f64::from(step)).floor() as i64).clamp(0, i64::from(bins) - 1) as u32;
+    let mut q = bin(d / f64::from(step), bins);
     let plane = |k: u32| {
         let s = step * k as f32;
         if from_max { hi - s } else { lo + s }
     };
     let cuts = |x: f32| if from_max { x < v } else { v < x };
+    let top = bins.saturating_sub(1);
     while q != 0 && cuts(plane(q)) {
-        q -= 1;
+        q = q.saturating_sub(1);
     }
-    while q < bins - 1 && !cuts(plane(q + 1)) {
-        q += 1;
+    while q < top && !cuts(plane(q.saturating_add(1))) {
+        q = q.saturating_add(1);
     }
     q
 }
@@ -988,31 +1228,38 @@ fn quantise(lo: f32, hi: f32, v: f32, bins: u32, from_max: bool) -> u32 {
 /// owns the low y and z (bits 30, 31; the left always owns the low x), and the inner max planes (10, 9 and 10 bits)
 /// with which child owns each max (bits 61-63), all quantised in the parent's box (FUN_14015c4b0).
 fn node(parent: [f32; 6], left: [f32; 6], right: [f32; 6]) -> Result<u64> {
-    if left[0] > right[0] {
+    let [pl0, pl1, pl2, ph0, ph1, ph2] = parent;
+    let [ll0, ll1, ll2, lh0, lh1, lh2] = left;
+    let [rl0, rl1, rl2, rh0, rh1, rh2] = right;
+    if ll0 > rl0 {
         return Err(bad(W, 0, "packed collision tree has an invalid low-X owner"));
     }
     let mut w = 0u64;
-    for a in 0..3 {
-        let inner = if right[a] <= left[a] { left[a] } else { right[a] };
-        w |= u64::from(quantise(parent[a], parent[3 + a], inner, 1024, false)) << (10 * a);
+    // (shift, parent min, parent max, left min, right min)
+    for (shift, lo, hi, l, r) in [
+        (0, pl0, ph0, ll0, rl0),
+        (10, pl1, ph1, ll1, rl1),
+        (20, pl2, ph2, ll2, rl2),
+    ] {
+        let inner = if r <= l { l } else { r };
+        w |= u64::from(quantise(lo, hi, inner, 1024, false)).wrapping_shl(shift);
     }
-    if left[1] > right[1] {
+    if ll1 > rl1 {
         w |= 1 << 30;
     }
-    if left[2] > right[2] {
+    if ll2 > rl2 {
         w |= 1 << 31;
     }
-    let shifts = [32, 42, 51];
-    for a in 0..3 {
-        let inner = if left[3 + a] <= right[3 + a] {
-            left[3 + a]
-        } else {
-            right[3 + a]
-        };
-        let bins = if a == 1 { 512 } else { 1024 };
-        w |= u64::from(quantise(parent[a], parent[3 + a], inner, bins, true)) << shifts[a];
-        if right[3 + a] > left[3 + a] {
-            w |= 1 << (61 + a);
+    // (shift, owner bit, bins, parent min, parent max, left max, right max)
+    for (shift, owner, bins, lo, hi, l, r) in [
+        (32, 61, 1024, pl0, ph0, lh0, rh0),
+        (42, 62, 512, pl1, ph1, lh1, rh1),
+        (51, 63, 1024, pl2, ph2, lh2, rh2),
+    ] {
+        let inner = if l <= r { l } else { r };
+        w |= u64::from(quantise(lo, hi, inner, bins, true)).wrapping_shl(shift);
+        if r > l {
+            w |= 1u64.wrapping_shl(owner);
         }
     }
     Ok(w)
@@ -1022,22 +1269,29 @@ fn node(parent: [f32; 6], left: [f32; 6], right: [f32; 6]) -> Result<u64> {
 /// keeps the parent's planes and the right takes the inner ones, each owner bit swapping its side. The root's box is
 /// its shape's bounds.
 pub fn decode_node(parent: [f32; 6], w: u64) -> ([f32; 6], [f32; 6]) {
-    let q = [w & 0x3FF, (w >> 10) & 0x3FF, (w >> 20) & 0x3FF];
-    let p = [(w >> 32) & 0x3FF, (w >> 42) & 0x1FF, (w >> 51) & 0x3FF];
-    let mut left = parent;
-    let mut right = [0f32; 6];
-    for a in 0..3 {
-        let (lo, hi) = (parent[a], parent[3 + a]);
+    let [pl0, pl1, pl2, ph0, ph1, ph2] = parent;
+    // the right child's min and max on an axis: the inner planes in the parent's box
+    let inner = |lo: f32, hi: f32, min_bits: u64, max_bits: u64, max_bins: f64| {
         let ext = f64::from(hi - lo);
-        let smin = (ext * 0.000_976_562_5) as f32;
-        let smax = (ext / if a == 1 { 512.0 } else { 1024.0 }) as f32;
-        right[a] = q[a] as f32 * smin + lo;
-        right[3 + a] = hi - p[a] as f32 * smax;
-    }
-    for (a, b) in [(1, 30), (2, 31), (3, 61), (4, 62), (5, 63)] {
-        if w >> b & 1 == 1 {
-            std::mem::swap(&mut left[a], &mut right[a]);
+        let smin = narrow(ext * 0.000_976_562_5);
+        let smax = narrow(ext / max_bins);
+        (min_bits as f32 * smin + lo, hi - max_bits as f32 * smax)
+    };
+    let (rl0, rh0) = inner(pl0, ph0, w & 0x3FF, (w >> 32) & 0x3FF, 1024.0);
+    let (rl1, rh1) = inner(pl1, ph1, (w >> 10) & 0x3FF, (w >> 42) & 0x1FF, 512.0);
+    let (rl2, rh2) = inner(pl2, ph2, (w >> 20) & 0x3FF, (w >> 51) & 0x3FF, 1024.0);
+    // each owner bit swaps the two children's plane
+    let owned = |bit: u32, l: f32, r: f32| {
+        if w.wrapping_shr(bit) & 1 == 1 {
+            (r, l)
+        } else {
+            (l, r)
         }
-    }
-    (left, right)
+    };
+    let (ll1, rl1) = owned(30, pl1, rl1);
+    let (ll2, rl2) = owned(31, pl2, rl2);
+    let (lh0, rh0) = owned(61, ph0, rh0);
+    let (lh1, rh1) = owned(62, ph1, rh1);
+    let (lh2, rh2) = owned(63, ph2, rh2);
+    ([pl0, ll1, ll2, lh0, lh1, lh2], [rl0, rl1, rl2, rh0, rh1, rh2])
 }

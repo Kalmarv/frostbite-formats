@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- `listing::TYPE_NAMES` names eight more resource types, matched by hash against the ids in the stock manifests (47 ids occur in 428,211 resource entries; 26 are named now): `PhysicsResource` `0x41759364` (33,277 entries), `OccluderMesh` `0x30b4a553` (442), `LayerGraphs` `0xde540c59` (22), `BundleRefTableResource` `0x428ec9d4` (8), `VisualTerrain` `0x1ca38e06`, `TerrainStreamingTree` `0x22fe8ac8` and `TerrainDecals` `0x15e1f32e` (4 each), `AtlasTexture` `0x957c32b1` (3). `resource_type_name` returns them (it returned `None`).
+- `meshset` documentation: `Section::flags` takes 15 values in the 300,875 stock sections and does not identify the section list a section is in; `MeshSet::tail` is the geometry (vertex bytes, index bytes and four more) of the one LOD whose chunk GUID is all zero. No code change.
+
 ## 0.2.0 (2026-10-27)
 
 Readings corrected against the stock install (every TOC, bundle manifest, EBX payload, depot and texture header of build 20260929 read). Breaking.

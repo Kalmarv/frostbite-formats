@@ -5,7 +5,10 @@
 //!
 //! A MeshSet is one relocatable block: fixed-size records whose pointers (u64, stored relative to byte 16) name a pool
 //! after them, then a relocation table listing every pointer field, then (one development mesh only) data the
-//! metadata sizes. The bundle's resource metadata is `{table offset, table bytes, trailing bytes, 0}`.
+//! metadata sizes. The bundle's resource metadata is `{table offset, table bytes, trailing bytes, 0}`. That trailing
+//! data is geometry: in skate.'s stock bundles the one MeshSet that has any (a development mesh) also has the only LOD
+//! whose chunk GUID is all zero, and the data is that LOD's vertex bytes, its index bytes and four more bytes
+//! (`tail.len() == vertex_bytes + index_bytes + 4`) instead of a geometry chunk ([`MeshSet::tail`]).
 //!
 //! ```text
 //! header (0xd0 bytes, 0xe0 for the meshes with bone bounds):
@@ -218,7 +221,11 @@ pub struct Section {
     pub decl: Decl,
     /// The draw layout: `decl` plus any streams filled at run time.
     pub draw_decl: Decl,
-    /// The section flags (u8 at +0x1b); `0x0e` is an opaque, shadow-casting section.
+    /// The section flags (u8 at +0x1b). Stock MeshSets hold 15 values, all below 0x20 (300,875 sections of skate.'s
+    /// build 20260929): `0x0a` on 170,233 sections, `0x04` on 116,897, `0x0e` on 10,935, the other twelve on fewer
+    /// than 600 each. The byte does not name the LOD's section list (a category) a section is in: `0x0a` is the
+    /// flag of sections in list 0 alone (156,048) as well as of sections in list 2 alone (9,943). What the bits mean
+    /// is not established.
     pub flags: u8,
     /// Total vertex stride in bytes (u8 at +0x1e).
     pub stride: u8,
@@ -268,6 +275,7 @@ pub struct Lod {
     /// The five lists of section indices (+0x14 + 12k).
     pub lists: [Vec<u8>; LISTS],
     /// GUID of the LOD's geometry chunk, which holds the vertex buffer and then the index buffer (16 bytes at +0x74).
+    /// All zero for the one stock LOD whose geometry is the MeshSet's [`tail`](MeshSet::tail) instead.
     pub chunk: [u8; 16],
     /// Bytes per index: 2 (format 0x21) or 4 (format 0x2e), from the LOD's index format at +0x54.
     pub index_size: u8,
@@ -300,7 +308,11 @@ pub struct MeshSet {
     pub bone_ids: Option<Vec<u16>>,
     /// The bone bounds as stored, 32 bytes each ([`bounds`] decodes one); present only in headers of [`HEADER_BONES`] bytes.
     pub bone_bounds: Option<Vec<[u8; BOUNDS]>>,
-    /// The data after the relocation table (the metadata's third word), which only [`read_resource`] reads.
+    /// The data after the relocation table (the metadata's third word), which only [`read_resource`] reads. Empty in
+    /// every stock MeshSet but one development mesh, where it is the geometry of the LOD whose [`Lod::chunk`] is all
+    /// zero: that LOD's vertex bytes and index bytes ([`Lod::vertex_bytes`], [`Lod::index_bytes`]) and four more
+    /// bytes, 2,001,568 in all (observed on skate.'s build 20260929; the order inside and the four bytes are not
+    /// examined).
     pub tail: Vec<u8>,
 }
 

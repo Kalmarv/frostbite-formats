@@ -4,7 +4,7 @@
 #![allow(clippy::unwrap_used)]
 
 use frostbite_formats::bytecode::{self, Span};
-use frostbite_formats::listing::{TYPE_NAMES, type_id};
+use frostbite_formats::listing::{TYPE_NAMES, resource_type_name, type_id};
 
 /// A container of one empty `DXIL` part: the `DXBC` magic, a 16-byte digest, version 1.0, the container's size, one
 /// part offset, and the part's fourcc and size.
@@ -104,4 +104,22 @@ fn resource_type_names_hash_to_their_ids() {
     ids.sort_unstable();
     ids.dedup();
     assert_eq!(ids.len(), TYPE_NAMES.len());
+}
+
+/// The eight names that are known from the hash match alone resolve from their ids.
+#[test]
+fn resource_types_known_from_their_hash_resolve() {
+    for (id, name) in [
+        (0x4175_9364, "PhysicsResource"),
+        (0x30B4_A553, "OccluderMesh"),
+        (0x1CA3_8E06, "VisualTerrain"),
+        (0x957C_32B1, "AtlasTexture"),
+        (0xDE54_0C59, "LayerGraphs"),
+        (0x428E_C9D4, "BundleRefTableResource"),
+        (0x22FE_8AC8, "TerrainStreamingTree"),
+        (0x15E1_F32E, "TerrainDecals"),
+    ] {
+        assert_eq!(resource_type_name(id), Some(name));
+        assert_eq!(type_id(name), id);
+    }
 }

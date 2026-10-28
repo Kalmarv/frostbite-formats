@@ -184,6 +184,10 @@ pub fn resource_type_name(rtype: u32) -> Option<&'static str> {
 /// The resource types this crate names and the names the game's executable holds for them (the id is the djb2-xor hash
 /// of the lowercased name: [`type_id`]). Some of the types have a reader in this crate ([`crate::texture`],
 /// [`crate::depot`], [`crate::bytecode`], [`crate::permutation`] and others); the rest are only named.
+///
+/// The last eight entries (`PhysicsResource` to `TerrainDecals`) are not from the executable's strings: each name is a
+/// candidate whose hash equals an id that occurs in the resource entries of skate.'s bundles (build 20260929), and
+/// the hash match is the whole evidence for it. 21 of the 47 ids that occur there match no name this crate knows.
 pub const TYPE_NAMES: &[(u32, &str)] = &[
     (crate::TEXTURE, "Texture"),
     (crate::MESHSET, "MeshSet"),
@@ -206,6 +210,14 @@ pub const TYPE_NAMES: &[(u32, &str)] = &[
     (0x589B_B36E, "ExpressionShaderPassBinding"),
     (0x6A5B_E5DB, "ExpressionShaderBindingSignature"),
     (0xF434_940D, "ShaderParameterCollectionTable"),
+    (0x4175_9364, "PhysicsResource"),
+    (0x30B4_A553, "OccluderMesh"),
+    (0x1CA3_8E06, "VisualTerrain"),
+    (0x957C_32B1, "AtlasTexture"),
+    (0xDE54_0C59, "LayerGraphs"),
+    (0x428E_C9D4, "BundleRefTableResource"),
+    (0x22FE_8AC8, "TerrainStreamingTree"),
+    (0x15E1_F32E, "TerrainDecals"),
 ];
 
 /// A resource type's id from its name: the lowercased name's [`djb2`](crate::djb2).

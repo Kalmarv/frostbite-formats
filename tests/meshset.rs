@@ -71,6 +71,8 @@ fn the_games_own_meshsets_round_trip() -> R {
     };
     let mut forms = std::collections::BTreeMap::<(usize, usize, bool), usize>::new();
     let mut tails = 0;
+    let mut flags = std::collections::BTreeMap::<u8, usize>::new();
+    let mut inline_lods = 0;
     for (name, bytes, meta) in &all {
         let m = meshset::read_resource(bytes, meta).map_err(|e| format!("{name}: {e}"))?;
         let (again, again_meta) = meshset::write(&m).map_err(|e| format!("{name}: {e}"))?;
@@ -99,11 +101,29 @@ fn the_games_own_meshsets_round_trip() -> R {
             .entry((m.header.len(), m.lod_size(), m.bone_bounds.is_some()))
             .or_default() += 1;
         tails += usize::from(!m.tail.is_empty());
+        // `MeshSet::tail` is the geometry of the LOD with no chunk: its vertex and index bytes and four more
+        let inline: Vec<_> = m.lods.iter().filter(|l| l.chunk == [0u8; 16]).collect();
+        inline_lods += inline.len();
+        match inline.as_slice() {
+            [] => assert!(m.tail.is_empty(), "{name}: a tail and every LOD has a chunk"),
+            [lod] => assert_eq!(
+                m.tail.len(),
+                lod.vertex_bytes as usize + lod.index_bytes as usize + 4,
+                "{name}: tail size"
+            ),
+            _ => panic!("{name}: {} LODs without a chunk", inline.len()),
+        }
+        for sec in m.lods.iter().flat_map(|l| &l.sections) {
+            *flags.entry(sec.flags).or_default() += 1;
+        }
     }
     eprintln!(
-        "{} MeshSets round trip; (header, LOD record, bone bounds): {forms:?}; {tails} with trailing data",
+        "{} MeshSets round trip; (header, LOD record, bone bounds): {forms:?}; {tails} with trailing data, {inline_lods} LODs without a chunk; section flags: {flags:x?}",
         all.len()
     );
+    assert_eq!(tails, inline_lods);
+    // the documented range of `Section::flags`
+    assert!(flags.keys().all(|&f| f < 0x20), "section flags: {flags:x?}");
     for lod in [LOD_PLAIN, LOD_MASKS, LOD_MAP] {
         assert!(forms.keys().any(|k| k.1 == lod), "LOD record {lod:#x} occurs");
     }

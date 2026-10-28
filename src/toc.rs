@@ -14,6 +14,18 @@ const W: &str = "toc";
 /// A Huffman table entry with this bit set is a leaf (`!char`); one without it names an internal node by its counter.
 const LEAF: u32 = 0x8000_0000;
 
+/// The bits of a TOC's flags word (header word 11).
+pub mod flags {
+    /// The base game's TOC of the same superbundle has bundles this one does not list: [`merge`](super::merge) takes them.
+    /// Set, with [`HAS_BASE_CHUNKS`], in 199 of the 245 TOCs of the installed mods (flags word 3; the other 46 are 0, and
+    /// 30 of the 199 have no base TOC in the stock data); the stock TOCs hold 4.
+    pub const HAS_BASE_BUNDLES: u32 = 1;
+    /// The base game's TOC has chunks this one does not list.
+    pub const HAS_BASE_CHUNKS: u32 = 2;
+    /// Bundle names are Huffman coded (the base game's TOCs).
+    pub const HUFFMAN_NAMES: u32 = 4;
+}
+
 /// Where a file lives: (patch folder or base game, install chunk, archive number).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Loc {
@@ -62,7 +74,7 @@ pub struct TocChunk {
 
 /// A superbundle TOC as stored: its flags, its bundles (name and inline region bytes), its chunk table and the
 /// perfect-hash maps over the bundle names and chunk GUIDs.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Toc {
     /// The TOC's flags word (header word 11). Bit 2 (value 4) means names are Huffman-coded, as in base-game TOCs; the rest are kept as stored.
     pub flags: u32,
@@ -74,6 +86,88 @@ pub struct Toc {
     pub bundle_hash: Vec<i32>,
     /// The perfect-hash table over the chunk GUIDs, in the same form; empty when the TOC lists no chunks.
     pub chunk_hash: Vec<i32>,
+}
+
+impl Toc {
+    /// Whether the flags word says the base game's TOC lists bundles this one lacks ([`flags::HAS_BASE_BUNDLES`]).
+    pub fn has_base_bundles(&self) -> bool {
+        self.flags & flags::HAS_BASE_BUNDLES != 0
+    }
+    /// Whether the flags word says the base game's TOC lists chunks this one lacks ([`flags::HAS_BASE_CHUNKS`]).
+    pub fn has_base_chunks(&self) -> bool {
+        self.flags & flags::HAS_BASE_CHUNKS != 0
+    }
+}
+
+/// The TOC a patch TOC describes together with the base TOC it builds on: what the game sees of the superbundle.
+///
+/// - With [`flags::HAS_BASE_BUNDLES`] the base's bundles stay, except those the patch lists again (matched by lowercase
+///   name: the patch's replaces the base's, wherever it stood); the patch's follow. Without it only the patch's bundles
+///   are kept.
+/// - With [`flags::HAS_BASE_CHUNKS`] the base's chunks stay, except those the patch lists again (matched by GUID); a
+///   patch chunk stored as removed (`None`) drops the base's and is not listed; the patch's others follow. Without it
+///   the patch's chunks are kept as they are.
+///
+/// The merged TOC keeps the patch's flags word minus the base bits and the Huffman bit, so it reads as a TOC that
+/// stands alone. Its entries are in the order of the perfect hash [`write`] lays out ([`perfect_hash`] over the merged
+/// keys), so [`verify`] holds and the TOC writes and reads back as it is. An error when the
+/// merged keys are not unique (a duplicate name that differs only in case within the patch or the base).
+pub fn merge(base: &Toc, patch: &Toc) -> Result<Toc> {
+    let key = |name: &str| name.to_lowercase();
+    let mut bundles: Vec<(String, Vec<u8>)> = Vec::new();
+    if patch.has_base_bundles() {
+        let replaced: std::collections::BTreeSet<String> =
+            patch.bundles.iter().map(|(n, _)| key(n)).collect();
+        bundles.extend(
+            base.bundles
+                .iter()
+                .filter(|(n, _)| !replaced.contains(&key(n)))
+                .cloned(),
+        );
+    }
+    bundles.extend(patch.bundles.iter().cloned());
+    let mut chunks: Vec<TocChunk> = Vec::new();
+    if patch.has_base_chunks() {
+        let overridden: std::collections::BTreeSet<[u8; 16]> = patch.chunks.iter().map(|c| c.guid).collect();
+        chunks.extend(
+            base.chunks
+                .iter()
+                .filter(|c| !overridden.contains(&c.guid))
+                .cloned(),
+        );
+    }
+    chunks.extend(
+        patch
+            .chunks
+            .iter()
+            .filter(|c| c.file.is_some() || !patch.has_base_chunks())
+            .cloned(),
+    );
+    let bkeys = bundles
+        .iter()
+        .map(|(n, _)| bundle_key(n))
+        .collect::<Result<Vec<_>>>()?;
+    let ckeys: Vec<Vec<u8>> = chunks.iter().map(|c| c.guid.to_vec()).collect();
+    let (bundle_hash, border) = perfect_hash(&bkeys)?;
+    let (chunk_hash, corder) = perfect_hash(&ckeys)?;
+    // a TOC lists its entries in the order of the perfect hash's slots: the stored tables index that order
+    let in_order = |order: &[usize], n: usize| -> Result<Vec<usize>> {
+        (order.len() == n && order.iter().all(|&i| i < n))
+            .then(|| order.to_vec())
+            .ok_or_else(|| bad(W, 0, "perfect-hash order does not cover the merged entries"))
+    };
+    let (border, corder) = (
+        in_order(&border, bundles.len())?,
+        in_order(&corder, chunks.len())?,
+    );
+    let merged = Toc {
+        flags: patch.flags & !(flags::HAS_BASE_BUNDLES | flags::HAS_BASE_CHUNKS | flags::HUFFMAN_NAMES),
+        bundle_hash,
+        chunk_hash,
+        bundles: border.iter().filter_map(|&i| bundles.get(i).cloned()).collect(),
+        chunks: corder.iter().filter_map(|&i| chunks.get(i).cloned()).collect(),
+    };
+    Ok(merged)
 }
 
 /// Huffman-coded names: leaves are `!char` values (top bit set), internal nodes counters, read in pairs (left, right).

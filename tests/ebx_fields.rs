@@ -340,3 +340,57 @@ fn a_type_reference_moves_to_the_slot_of_the_target_document() -> R {
     assert_eq!(other.fixup_type, Some(before));
     Ok(())
 }
+
+/// An enumeration is a type whose fields are its members, each member's value its field's `data_offset` read as a signed
+/// 32-bit number: `enum_member` names the member of a value, and says nothing for a value no member has, for a field
+/// that is not an enumeration and for an enumeration with no members.
+#[test]
+fn an_enumeration_value_names_its_member() -> R {
+    let mut doc = ebx::read(&build(plain(), [WIDE, OTHER, UNREFLECTED]))?;
+    let member = |name: &str, value: u32| ebx::FieldDescriptor {
+        name: name.to_string(),
+        name_hash: 0,
+        encoded_type: 0,
+        class_ref: 0,
+        data_offset: value,
+    };
+    let first = i32::try_from(doc.fields.len())?;
+    doc.fields
+        .extend([member("Off", 0), member("On", 1), member("Below", u32::MAX)]);
+    let ty = |name: &str, field_index, field_count| ebx::TypeDescriptor {
+        name: name.to_string(),
+        name_hash: 0,
+        field_index,
+        field_count,
+        encoded_type: 0,
+        size: 4,
+        alignment: 4,
+        guid: [9; 16],
+        signature: 0,
+    };
+    let mode = u16::try_from(doc.types.len())?;
+    doc.types.push(ty("Mode", first, 3));
+    doc.types.push(ty("Empty", first, 0));
+    let field = |doc: &Document, name: &str| doc.fields.iter().position(|f| f.name == name).unwrap();
+    let (stamp, mask, gain) = (field(&doc, "stamp"), field(&doc, "mask"), field(&doc, "gain"));
+    doc.fields[stamp].encoded_type = (FieldType::Enumeration as u16) << 4;
+    doc.fields[stamp].class_ref = mode;
+    doc.fields[mask].encoded_type = (FieldType::Enumeration as u16) << 4;
+    doc.fields[mask].class_ref = mode + 1;
+    assert_eq!(
+        doc.enum_members(stamp).collect::<Vec<_>>(),
+        [("Off", 0), ("On", 1), ("Below", -1)]
+    );
+    assert_eq!(doc.enum_member(stamp, 1), Some("On"));
+    assert_eq!(doc.enum_member(stamp, -1), Some("Below"));
+    assert_eq!(doc.enum_member(stamp, 2), None);
+    assert_eq!(
+        doc.enum_member(stamp, i64::from(u32::MAX)),
+        None,
+        "the value is signed"
+    );
+    assert_eq!(doc.enum_member(mask, 0), None, "a type with no members");
+    assert_eq!(doc.enum_member(gain, 0), None, "not an enumeration");
+    assert_eq!(doc.enum_member(usize::MAX, 0), None, "no such field");
+    Ok(())
+}

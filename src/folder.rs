@@ -16,7 +16,7 @@ use primase_foundations::compress::Decompressor;
 use primase_foundations::compress::oodle::Oodle;
 
 use crate::bundle::{self, FileRef, Manifest};
-use crate::db;
+use crate::layout::{self, Layout};
 use crate::toc::{self, Loc, Toc};
 use crate::{Error, Result};
 
@@ -50,6 +50,8 @@ pub struct Folder {
     archives: BTreeMap<(String, u32), PathBuf>,
     /// install chunk id -> lowercase directory relative to `Win32`.
     chunk_dirs: BTreeMap<u32, String>,
+    /// The folder's `layout.toc`, read.
+    pub layout: Layout,
 }
 
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
@@ -108,27 +110,18 @@ impl Folder {
         }
         tocs.sort();
         let layout_path = root.join("layout.toc");
-        let layout = fs::read(&layout_path).map_err(io(&layout_path))?;
-        let (_, layout, _) = db::read_file(&layout)?;
-        let mut chunk_dirs = BTreeMap::new();
-        if let Some(chunks) = layout
-            .field("installManifest")
-            .and_then(|m| m.field("installChunks"))
-        {
-            for e in &chunks.children {
-                if let (Some(name), Some(index)) = (e.field("name"), e.field("persistentIndex"))
-                    && name.ty == 7
-                    && let Some(i) = index.u32()
-                {
-                    chunk_dirs.insert(i, name.text().to_lowercase());
-                }
-            }
-        }
+        let layout = layout::read(&fs::read(&layout_path).map_err(io(&layout_path))?)?;
+        let chunk_dirs = layout
+            .install_chunks
+            .iter()
+            .filter_map(|c| Some((c.persistent_index?, c.directory().to_lowercase())))
+            .collect();
         Ok(Self {
             root,
             tocs,
             archives,
             chunk_dirs,
+            layout,
         })
     }
 
@@ -219,6 +212,27 @@ impl Source<'_> {
                 .ok_or_else(|| Error::Missing(format!("base game data is needed for {:?}", f.0)))?
                 .read(f)
         }
+    }
+
+    /// The superbundle TOC at `rel` (relative to the folder, as in [`Folder::tocs`]) as the game sees it: the folder's
+    /// TOC merged with the base game's TOC of the same path ([`toc::merge`]) when its flags say the base holds bundles or
+    /// chunks it lacks, else the folder's TOC as it is. A flagged TOC the base game has no TOC for (a superbundle the
+    /// folder adds: 30 of the 199 flagged TOCs of the installed mods) stands alone. An error when the TOC is flagged
+    /// and the source has no base game folder.
+    pub fn merged_toc(&self, rel: &str) -> Result<Toc> {
+        let patch = self.folder.toc(rel)?;
+        if !patch.has_base_bundles() && !patch.has_base_chunks() {
+            return Ok(patch);
+        }
+        let base = self.base.ok_or_else(|| {
+            Error::Missing(format!(
+                "{rel}: its flags name a base TOC and the source has no base game folder"
+            ))
+        })?;
+        if base.tocs.binary_search_by(|t| t.as_str().cmp(rel)).is_err() {
+            return toc::merge(&Toc::default(), &patch);
+        }
+        toc::merge(&base.toc(rel)?, &patch)
     }
 
     /// A CAS-framed file decoded to exactly `expected` bytes.

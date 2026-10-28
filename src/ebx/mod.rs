@@ -456,6 +456,46 @@ impl Document {
         self.fixup_type_target(t.fixup_type?)
     }
 
+    /// The members of the enumeration `field` (an index into [`Document::fields`], [`FieldValue::descriptor`]) declares: each
+    /// member's name and value. The reflection table lists an enumeration as a type whose fields are its members, the value
+    /// of a member being the field's `data_offset` read as a signed 32-bit number. Empty for a field that is not an
+    /// enumeration and for an enumeration with no members.
+    pub fn enum_members(&self, field: usize) -> impl Iterator<Item = (&str, i64)> + '_ {
+        let members = self
+            .fields
+            .get(field)
+            .filter(|f| f.ty() == FieldType::Enumeration)
+            .and_then(|f| self.types.get(usize::from(f.class_ref)))
+            .and_then(|t| {
+                let first = usize::try_from(t.field_index).ok()?;
+                self.fields
+                    .get(first..first.checked_add(usize::from(t.field_count))?)
+            })
+            .unwrap_or_default();
+        members
+            .iter()
+            .map(|m| (m.name.as_str(), i64::from(m.data_offset.cast_signed())))
+    }
+
+    /// The name of the member of the enumeration `field` ([`Document::enum_members`]) that has `value`; `None` when the
+    /// field is not an enumeration or no member has the value (one stock value, of 3,368,510, names no member).
+    pub fn enum_member(&self, field: usize, value: i64) -> Option<&str> {
+        self.enum_members(field)
+            .find(|&(_, v)| v == value)
+            .map(|(n, _)| n)
+    }
+
+    /// Where the elements of the array whose 4-byte slot lies at payload offset `slot` start (payload offsets, as
+    /// [`Instance::data_offset`]): the slot holds a displacement from itself to the first element, the count lying just
+    /// before it. `None` when the slot or the target lies outside the payload.
+    pub fn array_data_offset(&self, slot: u32) -> Option<u32> {
+        let at = usize::try_from(slot).ok()?;
+        let disp = i32::from_le_bytes(*self.payload.get(at..)?.first_chunk::<4>()?);
+        let target = i64::from(slot).checked_add(i64::from(disp))?;
+        let target = u32::try_from(target).ok()?;
+        (usize::try_from(target).ok()? <= self.payload.len()).then_some(target)
+    }
+
     /// The type name of instance `i`.
     pub fn type_name(&self, i: usize) -> Option<&str> {
         let d = self.instances.get(i)?.descriptor?;

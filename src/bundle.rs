@@ -234,6 +234,236 @@ impl Manifest {
     }
 }
 
+/// One bundle-size figure of a [`ChunkMetaBody::Container`] row: the stored shape is an object of a `resourceType` hash
+/// and a `value` object holding one named 32-bit number (`persistentTextureSize`, `bundledMeshSizes`, ...).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BundleMetric {
+    /// The resource type hash the figure counts (`resourceType`).
+    pub resource_type: u32,
+    /// The name of the number inside `value`.
+    pub name: String,
+    /// The number (an unsigned 32-bit value as stored).
+    pub value: u32,
+}
+
+/// What the `meta` object of a chunk metadata row holds. The three shapes of the stock manifests (and of the Studio
+/// manifests read beside them) are named; any other shape is refused by [`read_chunk_meta`] rather than guessed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ChunkMetaBody {
+    /// No children.
+    Empty,
+    /// `firstMip` (a signed 32-bit value): the first mip level the chunk stores (a texture chunk).
+    FirstMip(i32),
+    /// `container` (the bundle's name with a suffix) and the six `metrics` of the bundle; one row per bundle.
+    Container {
+        /// The `container` string.
+        container: String,
+        /// The `metrics` list, in stored order.
+        metrics: Vec<BundleMetric>,
+    },
+}
+
+/// One row of a manifest's `chunkMeta` list: the metadata of the chunk of the same index.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChunkMeta {
+    /// `h64`: eight bytes read as a little-endian number.
+    pub h64: u64,
+    /// The row's `meta` object.
+    pub meta: ChunkMetaBody,
+}
+
+fn meta_err(detail: impl Into<String>) -> crate::Error {
+    bad(M, 0, detail)
+}
+
+fn le_u32(n: &crate::db::Node, what: &str, ty: u8) -> Result<[u8; 4]> {
+    match (n.ty == ty, n.payload.as_slice()) {
+        (true, &[a, b, c, d]) => Ok([a, b, c, d]),
+        _ => Err(meta_err(format!(
+            "chunkMeta {what}: expected a 4-byte value of type {ty}"
+        ))),
+    }
+}
+
+/// The typed rows of a manifest's `chunkMeta` DB ([`Manifest::meta`]): an empty slice reads as no rows. Refused: a root
+/// that is not a list named `chunkMeta`, a row that does not hold exactly `h64` (8 bytes) and `meta`, a `meta` object
+/// that is none of [`ChunkMetaBody`]'s shapes, a node past the end of the list.
+pub fn read_chunk_meta(meta: &[u8]) -> Result<Vec<ChunkMeta>> {
+    use crate::db;
+    if meta.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (root, end) = db::read_node(meta, 0)?;
+    if end != meta.len() || root.ty != 1 || root.name != "chunkMeta" {
+        return Err(meta_err(
+            "chunkMeta: expected one list named chunkMeta that fills the metadata",
+        ));
+    }
+    root.children
+        .iter()
+        .map(|row| {
+            let [h64, body] = row.children.as_slice() else {
+                return Err(meta_err("chunkMeta row: expected the children h64 and meta"));
+            };
+            if row.ty != 2 || h64.name != "h64" || body.name != "meta" || body.ty != 2 {
+                return Err(meta_err("chunkMeta row: expected an object of h64 and meta"));
+            }
+            let h64 = match (h64.ty, h64.payload.as_slice()) {
+                (9, p) => u64::from_le_bytes(
+                    p.try_into()
+                        .map_err(|_| meta_err("chunkMeta h64: expected 8 bytes"))?,
+                ),
+                _ => return Err(meta_err("chunkMeta h64: expected a value of type 9")),
+            };
+            let names: Vec<&str> = body.children.iter().map(|c| c.name.as_str()).collect();
+            let meta = match names.as_slice() {
+                [] => ChunkMetaBody::Empty,
+                ["firstMip"] => ChunkMetaBody::FirstMip(i32::from_le_bytes(le_u32(
+                    body.children
+                        .first()
+                        .ok_or_else(|| meta_err("chunkMeta firstMip is missing"))?,
+                    "firstMip",
+                    8,
+                )?)),
+                ["container", "metrics"] => {
+                    let [container, metrics] = body.children.as_slice() else {
+                        return Err(meta_err("chunkMeta: expected container and metrics"));
+                    };
+                    if container.ty != 7 || metrics.ty != 1 {
+                        return Err(meta_err("chunkMeta: container is a string and metrics a list"));
+                    }
+                    ChunkMetaBody::Container {
+                        container: container.text(),
+                        metrics: metrics.children.iter().map(metric).collect::<Result<_>>()?,
+                    }
+                }
+                other => {
+                    return Err(meta_err(format!(
+                        "chunkMeta meta: children {other:?} are no known shape"
+                    )));
+                }
+            };
+            Ok(ChunkMeta { h64, meta })
+        })
+        .collect()
+}
+
+fn metric(n: &crate::db::Node) -> Result<BundleMetric> {
+    let [kind, value] = n.children.as_slice() else {
+        return Err(meta_err("chunkMeta metric: expected resourceType and value"));
+    };
+    if n.ty != 2 || kind.name != "resourceType" || value.name != "value" || value.ty != 2 {
+        return Err(meta_err(
+            "chunkMeta metric: expected an object of resourceType and value",
+        ));
+    }
+    let [number] = value.children.as_slice() else {
+        return Err(meta_err("chunkMeta metric: expected one number in value"));
+    };
+    Ok(BundleMetric {
+        resource_type: u32::from_le_bytes(le_u32(kind, "resourceType", 8)?),
+        name: number.name.clone(),
+        value: u32::from_le_bytes(le_u32(number, "metric value", 8)?),
+    })
+}
+
+fn container(children: Vec<crate::db::Node>) -> crate::db::Node {
+    crate::db::Node {
+        ty: 2,
+        children,
+        terminated: true,
+        ..crate::db::Node::default()
+    }
+}
+
+fn leaf(name: &str, ty: u8, payload: Vec<u8>) -> crate::db::Node {
+    crate::db::Node {
+        ty,
+        named: true,
+        name: name.to_string(),
+        payload,
+        ..crate::db::Node::default()
+    }
+}
+
+/// The `chunkMeta` DB for `rows`, the counterpart of [`read_chunk_meta`]. For no rows it is the empty list, which is
+/// what ReSkate Studio stores for a bundle without chunks; the stock bundles without chunks store no metadata at all
+/// (empty [`Manifest::meta`], which [`read_chunk_meta`] also reads as no rows).
+pub fn write_chunk_meta(rows: &[ChunkMeta]) -> Result<Vec<u8>> {
+    use crate::db;
+    let named = |mut n: db::Node, name: &str| {
+        n.named = true;
+        n.name = name.to_string();
+        n
+    };
+    let children = rows
+        .iter()
+        .map(|r| {
+            let body = match &r.meta {
+                ChunkMetaBody::Empty => Vec::new(),
+                ChunkMetaBody::FirstMip(m) => vec![leaf("firstMip", 8, m.to_le_bytes().to_vec())],
+                ChunkMetaBody::Container {
+                    container: c,
+                    metrics,
+                } => {
+                    let mut text = latin1(c, M)?;
+                    text.push(0);
+                    vec![
+                        leaf("container", 7, text),
+                        named(
+                            db::Node {
+                                ty: 1,
+                                terminated: true,
+                                children: metrics
+                                    .iter()
+                                    .map(|m| {
+                                        container(vec![
+                                            leaf("resourceType", 8, m.resource_type.to_le_bytes().to_vec()),
+                                            named(
+                                                container(vec![leaf(
+                                                    &m.name,
+                                                    8,
+                                                    m.value.to_le_bytes().to_vec(),
+                                                )]),
+                                                "value",
+                                            ),
+                                        ])
+                                    })
+                                    .collect(),
+                                ..db::Node::default()
+                            },
+                            "metrics",
+                        ),
+                    ]
+                }
+            };
+            Ok(container(vec![
+                leaf("h64", 9, r.h64.to_le_bytes().to_vec()),
+                named(container(body), "meta"),
+            ]))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let root = named(
+        db::Node {
+            ty: 1,
+            terminated: true,
+            children,
+            ..db::Node::default()
+        },
+        "chunkMeta",
+    );
+    let mut out = Vec::new();
+    db::write_node(&root, &mut out)?;
+    Ok(out)
+}
+
+impl Manifest {
+    /// The typed rows of [`Manifest::meta`] ([`read_chunk_meta`]): row `i` belongs to chunk `i`.
+    pub fn chunk_meta(&self) -> Result<Vec<ChunkMeta>> {
+        read_chunk_meta(&self.meta)
+    }
+}
+
 /// Whether `m` has a manifest's header (declared size and salted magic, either endianness).
 pub fn is_manifest(m: &[u8]) -> bool {
     let rd = Rd::new(m, M);

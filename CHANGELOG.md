@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+Additions from the prior-art follow-up; nothing here changes what an existing call returns.
+
+- **Patch TOCs.** `toc::flags` names the flags word's bits (`HAS_BASE_BUNDLES` 1, `HAS_BASE_CHUNKS` 2, `HUFFMAN_NAMES` 4); `Toc::has_base_bundles` / `has_base_chunks`; `toc::merge(base, patch)` gives the TOC the game sees (the base's bundles and chunks the patch does not name, then the patch's); `Source::merged_toc(rel)` reads it from a mod folder over the base game's `Data`. 167 of the 213 TOCs of the 82 installed mod folders set both bits (46 hold 0): 153 have a stock base TOC (all 5,990 of their bundles replace a base bundle, 161,186 of 164,345 chunks override one), 14 are superbundles the mod adds. Removed bundles, compact 3-word chunk records and bundles outside the TOC occur in none of the 213 mod TOCs or 23 stock TOCs, so they are still refused.
+- **`layout` module.** `layout.toc` typed (`superBundles`, `fs`, `head`, `platform`, `installChunks` with `id`, `name`, `installBundle`, `persistentIndex`, `superbundles`, `requiredChunks`, `alwaysInstalled`, `installGroups`, `excludedSuperbundles`, `settings.bundleFormat`), written back byte for byte; `Folder::layout`; `Folder::open` finds an install chunk's directory by `installBundle` when `name` is absent.
+- **`bundle::ChunkMeta`.** The typed rows of a manifest's `chunkMeta` (`h64`; no `meta`, `firstMip`, or `container` with the six `BundleMetric`s): `read_chunk_meta`, `write_chunk_meta`, `Manifest::chunk_meta`. All 239,810 stock rows read and write back byte for byte.
+- **EBX enumerations.** `Document::enum_members` / `enum_member` name the member of an enumeration value from the document's own reflection (3,368,509 of 3,368,510 stock values name one). `Value::Int` is unchanged.
+- **`names::GuidNames`.** A table from an EBX document's file GUID to its name, built bundle by bundle (`add_bundle`); `Document::array_data_offset` finds an array's elements from its slot.
+- **MeshSet enumerations.** `meshset::MeshType` (header byte 0x7c: rigid 46,977, skinned 296, composite 485 MeshSets), `PrimitiveType` (section byte 0x1f; triangle list in all 300,875 sections), `category` (the order of the five section lists), `set_flags` and `lod_flags` (the bits the data names), with `MeshSet::mesh_type`, `layout_flags`, `Lod::flags`, `Section::primitive_type`.
+- **CAS.** Codec 9 (LZ4, one raw LZ4 block to the block's decoded size) decodes; codec 0x0f (Zstandard) is refused naming the codec and the initfs dictionary it may need. No block of the stock data or of the 82 mod folders (11.5 million headers) uses either.
+
 ## 0.2.1 (2026-10-27)
 
 - `listing::TYPE_NAMES` names eight more resource types, matched by hash against the ids in the stock manifests (47 ids occur in 428,211 resource entries; 26 are named now): `PhysicsResource` `0x41759364` (33,277 entries), `OccluderMesh` `0x30b4a553` (442), `LayerGraphs` `0xde540c59` (22), `BundleRefTableResource` `0x428ec9d4` (8), `VisualTerrain` `0x1ca38e06`, `TerrainStreamingTree` `0x22fe8ac8` and `TerrainDecals` `0x15e1f32e` (4 each), `AtlasTexture` `0x957c32b1` (3). `resource_type_name` returns them (it returned `None`).

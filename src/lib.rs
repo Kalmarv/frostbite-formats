@@ -4,8 +4,9 @@
 //! # What it reads
 //!
 //! - **Archives and bundles:** superbundle TOCs ([`toc`]), a bundle's file table and manifest ([`bundle`]), CAS
-//!   archives, block by block and decoded ([`cas`]), the native DB behind `layout.toc` ([`db`]), a data folder
-//!   and the bundles it holds ([`folder`], [`listing`], [`scope`]), and ReSkate Studio's `.fbmod` mods ([`fbmod`]).
+//!   archives, block by block and decoded ([`cas`]), the native DB behind `layout.toc` ([`db`]) and `layout.toc`
+//!   itself typed ([`layout`]), a data folder and the bundles it holds ([`folder`], [`listing`], [`scope`]), a table
+//!   from EBX file GUIDs to document names ([`names`]), and ReSkate Studio's `.fbmod` mods ([`fbmod`]).
 //! - **EBX documents:** read into typed values, written again, and carried between documents ([`ebx`]).
 //! - **Shaders:** block depots ([`depot`]), the program and texture lookup tables ([`lookup`]), the permutation
 //!   selector ([`selector`]), permutations and their fixed-function state ([`permutation`]), binding sets
@@ -91,9 +92,11 @@ pub mod ebx;
 pub mod fbmod;
 pub mod folder;
 pub mod inputlayout;
+pub mod layout;
 pub mod listing;
 pub mod lookup;
 pub mod meshset;
+pub mod names;
 pub mod permutation;
 pub mod physics;
 pub mod rigid;

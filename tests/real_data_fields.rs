@@ -7,6 +7,10 @@
 //!   that says `Uint64` or `U64` is code 0x12, and each reads as the matching `Value` variant;
 //! - type references name a slot of the EFIX type list (always inside it), and a slot whose GUID some document of the
 //!   install reflects resolves to a type whose name fits the field (`TraitDataTypeRef` names `...TraitData` types);
+//! - every enumeration value is named by `Document::enum_member` but one (the census counted 3,368,510 values over 605
+//!   enumeration types, one of them naming no member), and no enumeration type is memberless;
+//! - the file GUID -> name table (`GuidNames`, built bundle by bundle) names every document of the install, no GUID gets
+//!   two names, and it agrees with the file GUIDs read out of the fully decoded documents;
 //! - every shader block of every depot parses to its last byte, the blocks with parameter type `0x566e2dd0` included;
 //! - a manifest chunk row's size is its stored range's `lsize`, `loff` is a multiple of 65,536, and `loff + lsize` is
 //!   the decoded size of the whole chunk in the TOC's chunk table.
@@ -23,6 +27,7 @@ use frostbite_formats::bundle::Kind;
 use frostbite_formats::depot;
 use frostbite_formats::ebx::{self, Document, FieldType, Object, TypeRef, Value};
 use frostbite_formats::folder::{Folder, Source};
+use frostbite_formats::names::GuidNames;
 use inputs::{Game, Tool, install_file, tool};
 use primase_foundations::compress::oodle::{Oodle, Version};
 
@@ -36,6 +41,15 @@ struct Tally {
     refs: BTreeMap<(String, [u8; 16]), u64>,
     /// every reflected type's GUID -> names, over the install
     guid_names: BTreeMap<[u8; 16], BTreeSet<String>>,
+    /// the enumeration types (by name) used by a field, and those of them with no member
+    enum_types: BTreeSet<String>,
+    /// the members (name, value) of every enumeration type used by a field, by type name
+    enum_members: BTreeMap<String, Vec<(String, i64)>>,
+    memberless_enums: BTreeSet<String>,
+    /// every document's file GUID -> its manifest names, as the decoded documents say it
+    file_names: BTreeMap<[u8; 16], BTreeSet<String>>,
+    /// every import's file GUID, with how many imports name it
+    imports: BTreeMap<[u8; 16], u64>,
 }
 
 impl Tally {
@@ -60,6 +74,15 @@ impl Tally {
         for (k, v) in o.guid_names {
             self.guid_names.entry(k).or_default().extend(v);
         }
+        self.enum_types.extend(o.enum_types);
+        self.enum_members.extend(o.enum_members);
+        self.memberless_enums.extend(o.memberless_enums);
+        for (k, v) in o.file_names {
+            self.file_names.entry(k).or_default().extend(v);
+        }
+        for (k, v) in o.imports {
+            *self.imports.entry(k).or_default() += v;
+        }
     }
 }
 
@@ -83,6 +106,7 @@ impl Walk<'_> {
         match v {
             Value::Object(o) => self.object(o),
             Value::Array(items, _) => items.iter().for_each(|x| self.value(key, field, x)),
+            Value::Int(n) if field_type == Some(FieldType::Enumeration) => self.enumeration(field, *n),
             Value::Int(_) | Value::UInt(_) => match (field_type, v) {
                 (Some(FieldType::Int64), Value::Int(_)) => self.integer64(key, true),
                 (Some(FieldType::UInt64), Value::UInt(_)) => self.integer64(key, false),
@@ -94,6 +118,40 @@ impl Walk<'_> {
             },
             Value::TypeRef(t) => self.type_ref(key, t),
             _ => {}
+        }
+    }
+
+    fn enumeration(&mut self, field: usize, value: i64) {
+        let doc = self.doc;
+        let ty = doc
+            .fields
+            .get(field)
+            .and_then(|f| doc.types.get(usize::from(f.class_ref)));
+        let name = ty.map_or("?".to_string(), |t| t.name.clone());
+        self.tally.enum_types.insert(name.clone());
+        if !self.tally.enum_members.contains_key(&name) {
+            let members = doc.enum_members(field).map(|(n, v)| (n.to_string(), v)).collect();
+            self.tally.enum_members.insert(name.clone(), members);
+        }
+        if ty.is_some_and(|t| t.field_count == 0) {
+            self.tally.memberless_enums.insert(name.clone());
+        }
+        self.tally.n("enumeration values");
+        match doc.enum_member(field, value) {
+            Some(member) => {
+                self.tally.n("enumeration values naming a member");
+                // the member reads back to the value, and the first member of that value is the one named
+                if !doc.enum_members(field).any(|(m, v)| m == member && v == value) {
+                    self.tally.n("enumeration members that do not read back");
+                }
+            }
+            None => {
+                self.tally.n("enumeration values naming no member");
+                self.tally.problem(format!(
+                    "{}: enumeration {name} = {value} names no member",
+                    self.name
+                ));
+            }
         }
     }
 
@@ -203,6 +261,13 @@ fn document(t: &mut Tally, bytes: &[u8], name: &str) {
         }
     };
     t.n("EBX payloads read");
+    t.file_names
+        .entry(doc.file_guid)
+        .or_default()
+        .insert(name.to_string());
+    for i in &doc.imports {
+        *t.imports.entry(i.file_guid).or_default() += 1;
+    }
     for ty in &doc.types {
         t.guid_names.entry(ty.guid).or_default().insert(ty.name.clone());
     }
@@ -270,6 +335,7 @@ fn field_readings_hold_over_the_install() -> Result<(), Box<dyn std::error::Erro
     let seen = Mutex::new(HashSet::new());
     let next = AtomicUsize::new(0);
     let total = Mutex::new(Tally::default());
+    let names = Mutex::new((GuidNames::new(), 0usize));
     let threads = std::thread::available_parallelism().map_or(4, usize::from).min(8);
     std::thread::scope(|scope| {
         for _ in 0..threads {
@@ -286,6 +352,17 @@ fn field_readings_hold_over_the_install() -> Result<(), Box<dyn std::error::Erro
                         }
                     };
                     t.counts.insert("bundles that did not read", listing.unread.len() as u64);
+                    let mut local = GuidNames::new();
+                    let mut done = std::collections::BTreeSet::new();
+                    let mut unreadable = 0;
+                    for bundle in &listing.bundles {
+                        unreadable += local.add_bundle(&src, bundle, &mut done).unreadable;
+                    }
+                    {
+                        let mut n = names.lock().unwrap();
+                        n.0.extend(local);
+                        n.1 += unreadable;
+                    }
                     for bundle in &listing.bundles {
                         for row in &bundle.manifest.chunks {
                             t.n("manifest chunk rows");
@@ -353,6 +430,7 @@ fn field_readings_hold_over_the_install() -> Result<(), Box<dyn std::error::Erro
         }
     });
     let t = total.into_inner().unwrap();
+    let (names, names_unreadable) = names.into_inner().unwrap();
     println!("{:#?}", t.counts);
     let count = |k: &str| t.counts.get(k).copied().unwrap_or(0);
 
@@ -422,6 +500,43 @@ fn field_readings_hold_over_the_install() -> Result<(), Box<dyn std::error::Erro
         all > 1000 && by_table_index * 2 < all,
         "{by_table_index} of {all}"
     );
+    // enumerations: every value but one names a member of its type, and no type is memberless
+    println!(
+        "{} enumeration types used, {} memberless; {} documents named by GuidNames ({} conflicts, {names_unreadable} unreadable); {} import file GUIDs",
+        t.enum_types.len(),
+        t.memberless_enums.len(),
+        names.len(),
+        names.conflicts().len(),
+        t.imports.len()
+    );
+    for (name, members) in &t.enum_members {
+        if [
+            "Mesh",
+            "Primitive",
+            "Instancing",
+            "IndexBuffer",
+            "SubsetCategory",
+            "VertexElement",
+        ]
+        .iter()
+        .any(|k| name.contains(k))
+        {
+            println!("ENUM {name}: {members:?}");
+        }
+    }
+    assert_eq!(count("enumeration values"), 3_368_510, "{:?}", t.problems);
+    assert_eq!(count("enumeration values naming a member"), 3_368_509);
+    assert_eq!(count("enumeration values naming no member"), 1);
+    assert_eq!(count("enumeration members that do not read back"), 0);
+    assert!(t.memberless_enums.is_empty(), "{:?}", t.memberless_enums);
+    // the file GUID table: it names the documents the decoded files say it does, with no GUID given two names
+    assert_eq!(names_unreadable, 0);
+    assert!(names.conflicts().is_empty(), "{:?}", names.conflicts());
+    assert_eq!(names.len(), t.file_names.len());
+    for (guid, expected) in &t.file_names {
+        let got = names.get(guid).unwrap_or("");
+        assert!(expected.contains(got), "{got} not among {expected:?}");
+    }
     // the depots: every block parses, the one-byte parameter type among them
     assert!(count("shader blocks parsed to their last byte") > 60_000);
     assert!(count("shader blocks holding parameter type 0x566e2dd0") > 0);

@@ -55,6 +55,12 @@ primase_testdata::inputs! {
             about: r#"the skate. install's `Data` folder (its `layout.toc`, TOCs and CAS archives), read only"#,
             source: r#"the user's own install"#,
         },
+        Query::Install(Game::Skate, Some("Mods")) => {
+            status: Live,
+            gate: false,
+            about: r#"the skate. install's `Mods` folder: one folder per installed mod (ReSkate Studio output among them), each with its own `layout.toc`, `Win32` TOCs and CAS archives, read only on top of `Data`; tests/real_data_batch.rs"#,
+            source: r#"the user's own install"#,
+        },
         Query::Oracle(OracleSet::Baseline, Game::Skate, "fbmod") => {
             status: Live,
             gate: false,

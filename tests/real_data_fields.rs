@@ -530,6 +530,26 @@ fn field_readings_hold_over_the_install() -> Result<(), Box<dyn std::error::Erro
     assert_eq!(count("enumeration members that do not read back"), 0);
     assert!(t.memberless_enums.is_empty(), "{:?}", t.memberless_enums);
     // the file GUID table: it names the documents the decoded files say it does, with no GUID given two names
+    let (mut import_refs, mut resolved_refs) = (0u64, 0u64);
+    let (mut resolved_guids, mut unresolved) = (0u64, Vec::new());
+    for (guid, n) in &t.imports {
+        import_refs += n;
+        if names.get(guid).is_some() {
+            resolved_refs += n;
+            resolved_guids += 1;
+        } else if unresolved.len() < 3 {
+            unresolved.push(frostbite_formats::hex(guid));
+        }
+    }
+    println!(
+        "imports: {import_refs} references to {} file GUIDs; {resolved_refs} references and {resolved_guids} GUIDs named by the table (unnamed e.g. {unresolved:?})",
+        t.imports.len()
+    );
+    // the census of build 20260929: 865,673 references to 147,320 file GUIDs; two GUIDs, one reference each, name a
+    // document no bundle of the install holds
+    assert_eq!(import_refs, 865_673);
+    assert_eq!(resolved_refs, 865_671, "{unresolved:?}");
+    assert_eq!(resolved_guids, 147_318);
     assert_eq!(names_unreadable, 0);
     assert!(names.conflicts().is_empty(), "{:?}", names.conflicts());
     assert_eq!(names.len(), t.file_names.len());

@@ -248,3 +248,141 @@ fn hostile_pointers_and_counts_are_refused() {
     far.vertices = u32::MAX;
     assert_eq!(far.stream_offset(0), Some(u32::MAX as usize));
 }
+
+/// The enumerations and flag words of the games own MeshSets: the kind byte, the layout flag words, the primitive type.
+/// Prints the census of every bit and asserts the relations that name them.
+#[test]
+fn the_games_own_meshsets_name_their_enumerations() -> R {
+    use frostbite_formats::meshset::{MeshType, PrimitiveType, usage};
+    let Some(all) = meshsets(&[])? else {
+        return Ok(());
+    };
+    let mut by_type = std::collections::BTreeMap::<u8, (u64, u64, u64, u64)>::new();
+    let mut set_bits = [0u64; 32];
+    let mut lod_bits = [0u64; 32];
+    let mut base_vs_first = [[0u64; 2]; 2];
+    let mut streaming_vs_chunk = [[0u64; 2]; 2];
+    let mut primitives = std::collections::BTreeMap::<u8, u64>::new();
+    let (mut meshes, mut lods) = (0u64, 0u64);
+    let mut header_streaming = [[0u64; 2]; 2];
+    let mut instancing = [[0u64; 2]; 2];
+    let mut multi = std::collections::BTreeMap::<(bool, bool, bool), u64>::new();
+    let mut record_by_kind = std::collections::BTreeMap::<(u8, usize), u64>::new();
+    for (name, bytes, meta) in &all {
+        let m = meshset::read_resource(bytes, meta)?;
+        meshes += 1;
+        let ty = m.header[meshset::HEADER_TYPE];
+        let e = by_type.entry(ty).or_default();
+        e.0 += 1;
+        e.1 += u64::from(m.header.len() == meshset::HEADER_BONES);
+        let skinned_decl = m
+            .lods
+            .iter()
+            .flat_map(|l| &l.sections)
+            .any(|s| s.decl.element(usage::BLEND_INDICES).is_some());
+        e.2 += u64::from(skinned_decl);
+        e.3 += u64::from(
+            m.lods
+                .iter()
+                .flat_map(|l| &l.sections)
+                .all(|s| s.decl.element(usage::BLEND_INDICES).is_some()),
+        );
+        assert!(m.mesh_type().is_some(), "{name}: kind {ty}");
+        *record_by_kind.entry((ty, m.lod_size())).or_default() += 1;
+        header_streaming[usize::from(m.layout_flags() & 1 != 0)]
+            [usize::from(m.lods.iter().any(|l| l.chunk == [0; 16]))] += 1;
+        instancing[usize::from(m.layout_flags() >> 2 & 1 != 0)]
+            [usize::from(m.lods.iter().any(|l| l.flags() >> 4 & 1 != 0))] += 1;
+        for lod in &m.lods {
+            let streams = |s: &meshset::Section| s.decl.strides.len() >= 2;
+            *multi
+                .entry((
+                    lod.flags() >> 9 & 1 != 0,
+                    lod.sections.iter().all(streams),
+                    lod.sections.iter().any(streams),
+                ))
+                .or_default() += 1;
+        }
+        for (b, n) in set_bits.iter_mut().enumerate() {
+            *n += u64::from(m.layout_flags() >> b & 1);
+        }
+        for (i, lod) in m.lods.iter().enumerate() {
+            lods += 1;
+            for (b, n) in lod_bits.iter_mut().enumerate() {
+                *n += u64::from(lod.flags() >> b & 1);
+            }
+            base_vs_first[usize::from(lod.flags() & 1 != 0)][usize::from(i == 0)] += 1;
+            streaming_vs_chunk[usize::from(lod.flags() >> 6 & 1 != 0)][usize::from(lod.chunk != [0; 16])] +=
+                1;
+            for s in &lod.sections {
+                *primitives
+                    .entry(s.record[meshset::SECTION_PRIMITIVE])
+                    .or_default() += 1;
+            }
+        }
+    }
+    println!("{meshes} MeshSets, {lods} LODs");
+    println!(
+        "kind byte -> (meshes, with bone-bounds header, with blend indices in some section, in every section): {by_type:?}"
+    );
+    println!(
+        "header flag word bit counts: {:?}",
+        set_bits
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| **n > 0)
+            .collect::<Vec<_>>()
+    );
+    println!(
+        "LOD flag word bit counts: {:?}",
+        lod_bits
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| **n > 0)
+            .collect::<Vec<_>>()
+    );
+    println!("bit 0 set x is LOD 0 [[no,no],[no,yes]..]: {base_vs_first:?}");
+    println!("bit 6 set x has a geometry chunk: {streaming_vs_chunk:?}");
+    println!("section primitive byte: {primitives:?}");
+    println!("header bit 0 clear x has an inline LOD: {header_streaming:?}");
+    println!("header bit 2 x some LOD has bit 4: {instancing:?}");
+    println!("LOD bit 9 x every section has two or more streams / some section does: {multi:?}");
+    println!("kind x LOD record size: {record_by_kind:?}");
+    // the kind names the LOD record form: plain (0xb0), bone map (0xbc), bone masks (0xb8)
+    assert_eq!(
+        record_by_kind.keys().copied().collect::<Vec<_>>(),
+        [
+            (MeshType::Rigid as u8, LOD_PLAIN),
+            (MeshType::Skinned as u8, LOD_MAP),
+            (MeshType::Composite as u8, LOD_MASKS)
+        ]
+    );
+    // the flag bits that are named: set and clear exactly with what they say
+    assert_eq!(
+        header_streaming,
+        [[0, 1], [47_757, 0]],
+        "header bit 0 is clear for the one mesh with an inline LOD"
+    );
+    assert_eq!(
+        instancing,
+        [[47_437, 0], [0, 321]],
+        "header bit 2 is set exactly when some LOD sets its bit 4"
+    );
+    assert_eq!(
+        streaming_vs_chunk,
+        [[1, 0], [0, 126_013]],
+        "LOD bit 6 is set exactly when the LOD has a geometry chunk"
+    );
+    for (ty, (n, bones, _, _)) in &by_type {
+        assert_eq!(
+            *bones,
+            if *ty == MeshType::Rigid as u8 { 0 } else { *n },
+            "kind {ty}"
+        );
+    }
+    assert_eq!(
+        primitives.keys().copied().collect::<Vec<_>>(),
+        [PrimitiveType::TriangleList as u8]
+    );
+    Ok(())
+}

@@ -242,6 +242,10 @@ pub struct Section {
 }
 
 impl Section {
+    /// The primitive type of the section's indices ([`SECTION_PRIMITIVE`]); `None` for a value that is none of [`PrimitiveType`].
+    pub fn primitive_type(&self) -> Option<PrimitiveType> {
+        PrimitiveType::from_u8(self.record.get(SECTION_PRIMITIVE).copied()?)
+    }
     /// Where stream `j` starts in the chunk; `None` when the section has no stream `j` (`j` may be the stream count,
     /// the end of the last) or the offset does not fit the address space.
     pub fn stream_offset(&self, j: usize) -> Option<usize> {
@@ -291,6 +295,13 @@ pub struct Lod {
     pub bone_map: Option<Vec<u32>>,
 }
 
+impl Lod {
+    /// The LOD's layout flags word ([`LOD_FLAGS`]).
+    pub fn flags(&self) -> u32 {
+        word(&self.record, LOD_FLAGS)
+    }
+}
+
 /// A MeshSet as read: the records as stored, with the typed fields, names and tables decoded beside them.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MeshSet {
@@ -316,7 +327,130 @@ pub struct MeshSet {
     pub tail: Vec<u8>,
 }
 
+/// A MeshSet's kind, the byte at header 0x7c. In all 47,758 stock MeshSets: `Rigid` (46,977), `Skinned` (296) and
+/// `Composite` (485). The kind decides the form of the LOD records (plain [`LOD_PLAIN`], a bone map [`LOD_MAP`] for
+/// `Skinned`, per-section bone masks [`LOD_MASKS`] for `Composite`) and whether the header has bone bounds
+/// ([`HEADER_BONES`]); every section of the 781 meshes of the last two declares blend indices and none of the rigid ones
+/// does. The names are those of Frostbite's mesh types; which of the two non-rigid kinds is `Skinned` and which
+/// `Composite` is the names' order, which the data does not contradict.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum MeshType {
+    /// A mesh drawn as it is.
+    Rigid = 0,
+    /// A mesh deformed by a skeleton.
+    Skinned = 1,
+    /// A mesh made of parts that move with a skeleton.
+    Composite = 2,
+}
+
+impl MeshType {
+    /// The type the byte `v` names.
+    pub fn from_u8(v: u8) -> Option<Self> {
+        Some(match v {
+            0 => Self::Rigid,
+            1 => Self::Skinned,
+            2 => Self::Composite,
+            _ => return None,
+        })
+    }
+}
+
+/// Where a MeshSet header keeps its kind ([`MeshType`], a byte).
+pub const HEADER_TYPE: usize = 0x7c;
+/// Where a MeshSet header keeps its layout flags (a `u32`).
+pub const HEADER_FLAGS: usize = 0xa8;
+/// Where a LOD record keeps its layout flags (a `u32`).
+pub const LOD_FLAGS: usize = 0x50;
+/// Where a section record keeps its primitive type ([`PrimitiveType`], a byte).
+pub const SECTION_PRIMITIVE: usize = 0x1f;
+
+/// Primitive types of a section's indices. :observed: byte 0x1f of a section record is 3 in all 300,875 stock sections.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum PrimitiveType {
+    /// Separate points.
+    PointList = 0,
+    /// Separate lines.
+    LineList = 1,
+    /// A strip of lines.
+    LineStrip = 2,
+    /// Separate triangles, three indices each: the only type in the stock data.
+    TriangleList = 3,
+    /// A strip of triangles.
+    TriangleStrip = 5,
+    /// Separate quads.
+    QuadList = 7,
+    /// Rectangles (a console primitive).
+    XenonRectList = 8,
+    /// Tessellation patches of triangles.
+    TrianglePatch = 9,
+}
+
+impl PrimitiveType {
+    /// The type the byte `v` names.
+    pub fn from_u8(v: u8) -> Option<Self> {
+        Some(match v {
+            0 => Self::PointList,
+            1 => Self::LineList,
+            2 => Self::LineStrip,
+            3 => Self::TriangleList,
+            5 => Self::TriangleStrip,
+            7 => Self::QuadList,
+            8 => Self::XenonRectList,
+            9 => Self::TrianglePatch,
+            _ => return None,
+        })
+    }
+}
+
+/// The section lists of a LOD ([`Lod::lists`]) by what each draws: the order of the subset categories Frostbite meshes
+/// use. :inferred from that order and from the use of the lists (the decal sections are in list 2); no field of the
+/// data names them.
+pub mod category {
+    /// The main pass.
+    pub const OPAQUE: usize = 0;
+    /// Transparent sections (non-empty in 228 of 126,014 stock LODs).
+    pub const TRANSPARENT: usize = 1;
+    /// Decals.
+    pub const TRANSPARENT_DECAL: usize = 2;
+    /// The depth-only pass.
+    pub const Z_ONLY: usize = 3;
+    /// The shadow pass.
+    pub const SHADOW: usize = 4;
+}
+
+/// The bits of a MeshSet's layout flags word ([`HEADER_FLAGS`]) that the data names. Bits 0 to 31 take other values in the
+/// stock data (bits 1, 4 and 7 on 25, 3 and 557 MeshSets, a block of four tier bits at each of 8 to 11, 12 to 15, 16 to 19
+/// and 20 to 23, bits 29, 30 and 31 on 470, 134 and 38,345) that nothing here names.
+pub mod set_flags {
+    /// The geometry lies in chunks. Set on 47,757 of the 47,758 stock MeshSets; clear on the one whose LOD holds its
+    /// geometry inline ([`MeshSet::tail`](super::MeshSet::tail)).
+    pub const STREAMING_ENABLE: u32 = 1 << 0;
+    /// Set on a MeshSet exactly when some LOD sets [`lod_flags::STREAM_INSTANCING_ENABLE`](super::lod_flags) (321
+    /// MeshSets).
+    pub const STREAM_INSTANCING_ENABLE: u32 = 1 << 2;
+}
+
+/// The bits of a LOD's layout flags word ([`LOD_FLAGS`]) that the data names. Bits 0, 9, 17 and 18 take other values (50,130,
+/// 738, 2,364 and 1,200 of the 126,014 stock LODs) that nothing here names; bit 0 is not set exactly on a MeshSet's first
+/// LOD.
+pub mod lod_flags {
+    /// The LOD's geometry is a chunk: set on 126,013 stock LODs, clear on the one whose geometry is inline.
+    pub const STREAMING_ENABLE: u32 = 1 << 6;
+    /// Set on 402 stock LODs, all in the MeshSets that set [`set_flags::STREAM_INSTANCING_ENABLE`](super::set_flags).
+    pub const STREAM_INSTANCING_ENABLE: u32 = 1 << 4;
+}
+
 impl MeshSet {
+    /// The kind of mesh the header byte at [`HEADER_TYPE`] names; `None` for a value that is none of [`MeshType`].
+    pub fn mesh_type(&self) -> Option<MeshType> {
+        MeshType::from_u8(self.header.get(HEADER_TYPE).copied()?)
+    }
+    /// The header's layout flags word ([`HEADER_FLAGS`]); 0 for a header too short to hold it.
+    pub fn layout_flags(&self) -> u32 {
+        word(&self.header, HEADER_FLAGS)
+    }
     /// The header's LOD record size (0x04).
     pub fn lod_size(&self) -> usize {
         wide(word(&self.header, 4))

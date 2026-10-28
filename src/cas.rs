@@ -1,7 +1,7 @@
 //! Frostbite CAS: a sequence of blocks, each an eight-byte header and an exactly sized payload ([`blocks`]), and the
 //! codec that decodes a stream of them to its bytes ([`Cas`]), the Oodle blocks through the caller's handle to the
 //! game's library.
-use primase_foundations::compress::{Compressor, Decompressor, Error, Result, Zlib, oodle::Oodle};
+use primase_foundations::compress::{Compressor, Decompressor, Error, Lz4, Result, Zlib, oodle::Oodle};
 
 pub(crate) fn invalid(offset: usize, detail: impl ToString) -> Error {
     Error::Invalid {
@@ -28,7 +28,7 @@ pub(crate) fn check_size(actual: usize, expected: usize) -> Result<()> {
 pub struct Block<'a> {
     /// Where the block's header starts in the stream.
     pub offset: usize,
-    /// The codec byte: 0 raw, 2 zlib, 0x11, 0x15 and 0x19 Oodle.
+    /// The codec byte: 0 raw, 2 zlib, 9 LZ4, 0x0f Zstandard, 0x11, 0x15 and 0x19 Oodle.
     pub kind: u8,
     /// The size of the block once decoded.
     pub decoded_size: usize,
@@ -105,8 +105,11 @@ impl Compressor for CasRaw {
     }
 }
 
-/// CAS codec, optional explicit Oodle implementation. Decode supports raw, zlib,
-/// and kinds 0x11/0x15/0x19. Unknown kinds are errors with physical offsets.
+/// CAS codec, optional explicit Oodle implementation. Decode supports raw, zlib, LZ4 (kind 9: one raw LZ4 block to the
+/// block's decoded size) and kinds 0x11/0x15/0x19. No block of the stock data or of the installed mods is zlib or LZ4
+/// (only kinds 0 and 0x11 occur in their 11.5 million block headers); the LZ4 framing is ReSkate's, tested here on
+/// synthetic blocks only. Zstandard (kind 0x0f) is refused: Frostbite compresses with a dictionary, which lives in the
+/// encrypted initfs. Unknown kinds are errors with physical offsets.
 #[derive(Debug, Default)]
 pub struct Cas<'a> {
     /// The Oodle library to decode (and encode) Oodle blocks with; blocks of the other kinds need none.
@@ -147,6 +150,16 @@ impl Decompressor for Cas<'_> {
                         .decompress(b.payload, b.decoded_size)
                         .map_err(|e| invalid(b.offset, e))?,
                 ),
+                9 => dst.copy_from_slice(
+                    &Lz4.decompress(b.payload, b.decoded_size)
+                        .map_err(|e| invalid(b.offset, e))?,
+                ),
+                0x0f => {
+                    return Err(invalid(
+                        b.offset,
+                        "codec 0x0f (Zstandard) is not read: a dictionary from the initfs may be needed to decode it",
+                    ));
+                }
                 0x11 | 0x15 | 0x19 => {
                     let oodle = self
                         .oodle

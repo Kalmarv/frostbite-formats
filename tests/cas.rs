@@ -37,6 +37,58 @@ fn raw_round_trips() -> R {
     Ok(())
 }
 
+/// A block of codec 9 holds one raw LZ4 block that decodes to the block's decoded size (ReSkate's framing; no stock or mod
+/// block uses it, so the framing is checked on blocks built here). Codec 0x0f (Zstandard) is refused, naming the codec.
+#[test]
+fn lz4_blocks_decode_and_zstandard_is_refused() -> R {
+    use primase_foundations::compress::Lz4;
+    let frame = |decoded: usize, kind: u8, payload: &[u8]| {
+        let mut out = vec![
+            0,
+            (decoded >> 16) as u8,
+            (decoded >> 8) as u8,
+            decoded as u8,
+            kind,
+        ];
+        out.extend([
+            0x70 | (payload.len() >> 16) as u8,
+            (payload.len() >> 8) as u8,
+            payload.len() as u8,
+        ]);
+        out.extend(payload);
+        out
+    };
+    let input: Vec<u8> = (0..40_000u32).map(|i| (i / 7 % 251) as u8).collect();
+    let packed = Lz4.compress(&input)?;
+    assert!(packed.len() < input.len());
+    let two = [frame(input.len(), 9, &packed), frame(5, 0, b"hello")].concat();
+    assert_eq!(blocks(&two)?[0].kind, 9);
+    let decoded = Cas::default().decompress(&two, input.len() + 5)?;
+    assert_eq!(&decoded[..input.len()], &input[..]);
+    assert_eq!(&decoded[input.len()..], b"hello");
+    // a block that decodes to another size, or a damaged one, is refused with its offset
+    assert!(
+        Cas::default()
+            .decompress(&frame(input.len() + 1, 9, &packed), input.len() + 1)
+            .is_err()
+    );
+    let mut damaged = packed.clone();
+    damaged.truncate(damaged.len() - 3);
+    assert!(
+        Cas::default()
+            .decompress(&frame(input.len(), 9, &damaged), input.len())
+            .is_err()
+    );
+    assert!(Cas::default().decompress(&frame(4, 9, &[]), 4).is_err());
+    // Zstandard
+    let e = Cas::default()
+        .decompress(&frame(5, 0x0f, &[0x28, 0xb5, 0x2f, 0xfd, 0, 0]), 5)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("0x0f") && e.contains("dictionary"), "{e}");
+    Ok(())
+}
+
 #[test]
 fn strict_framing() -> R {
     let raw = CasRaw.compress(b"hello")?;

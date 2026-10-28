@@ -7,7 +7,7 @@
 //! after them, then a relocation table listing every pointer field, then (one development mesh only) data the
 //! metadata sizes. The bundle's resource metadata is `{table offset, table bytes, trailing bytes, 0}`. That trailing
 //! data is geometry: in skate.'s stock bundles the one MeshSet that has any (a development mesh) also has the only LOD
-//! whose chunk GUID is all zero, and the data is that LOD's vertex bytes, its index bytes and four more bytes
+//! whose chunk GUID is all zero, and the data is that LOD's vertex bytes, its index bytes and four zero bytes
 //! (`tail.len() == vertex_bytes + index_bytes + 4`) instead of a geometry chunk ([`MeshSet::tail`]).
 //!
 //! ```text
@@ -311,8 +311,8 @@ pub struct MeshSet {
     /// The data after the relocation table (the metadata's third word), which only [`read_resource`] reads. Empty in
     /// every stock MeshSet but one development mesh, where it is the geometry of the LOD whose [`Lod::chunk`] is all
     /// zero: that LOD's vertex bytes and index bytes ([`Lod::vertex_bytes`], [`Lod::index_bytes`]) and four more
-    /// bytes, 2,001,568 in all (observed on skate.'s build 20260929; the order inside and the four bytes are not
-    /// examined).
+    /// bytes, 2,001,568 in all: the vertex buffer, then the index buffer (every index names a vertex of the LOD), then
+    /// four zero bytes (observed on skate.'s build 20260929).
     pub tail: Vec<u8>,
 }
 

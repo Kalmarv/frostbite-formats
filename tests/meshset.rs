@@ -106,11 +106,22 @@ fn the_games_own_meshsets_round_trip() -> R {
         inline_lods += inline.len();
         match inline.as_slice() {
             [] => assert!(m.tail.is_empty(), "{name}: a tail and every LOD has a chunk"),
-            [lod] => assert_eq!(
-                m.tail.len(),
-                lod.vertex_bytes as usize + lod.index_bytes as usize + 4,
-                "{name}: tail size"
-            ),
+            [lod] => {
+                let (vb, ib) = (lod.vertex_bytes as usize, lod.index_bytes as usize);
+                assert_eq!(m.tail.len(), vb + ib + 4, "{name}: tail size");
+                // the vertex buffer, then the index buffer, then four zero bytes: every index names a vertex
+                let vertices = lod.sections.iter().map(|s| s.vertices).max().unwrap_or(0);
+                let width = usize::from(lod.index_size);
+                for index in m.tail[vb..vb + ib].chunks_exact(width) {
+                    let mut le = [0u8; 4];
+                    le[..width].copy_from_slice(index);
+                    assert!(
+                        u32::from_le_bytes(le) < vertices,
+                        "{name}: an index past the vertices"
+                    );
+                }
+                assert_eq!(m.tail[vb + ib..], [0; 4], "{name}: the last four bytes");
+            }
             _ => panic!("{name}: {} LODs without a chunk", inline.len()),
         }
         for sec in m.lods.iter().flat_map(|l| &l.sections) {

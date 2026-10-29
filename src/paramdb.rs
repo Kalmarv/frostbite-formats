@@ -23,9 +23,13 @@
 //! depot parameter prefixes, equal in type and identity.
 //!
 //! What the other 48 bits of [`ParamKey::hash`] are is **not known**: they are no CityHash64, FarmHash, xxHash,
-//! Murmur or FNV hash of the name in the layouts tried, so [`ParamKey::from_parts`] takes them from the caller. A
-//! writer that needs a key for a new parameter name can compose everything but those bits; for a parameter the game
-//! already has, the stock key is the only source of them.
+//! Murmur or FNV hash of the name in the layouts tried, and over the 207 known keys they look uniformly random and are
+//! no bytes of the asset's GUIDs. [`ParamKey::from_parts`] therefore takes them from the caller.
+//!
+//! In practice a writer never needs to compute them. A key for a stock parameter is **copied** from the stock material
+//! or depot, never recomputed. A key for a new parameter is its name hash plus any 48 bits, as long as the material
+//! and the depot that is written beside it carry the same key; that the game accepts arbitrary low bits is inferred
+//! from the engine never hashing names while a level loads, and has not been tried in the game.
 
 use std::collections::BTreeMap;
 
@@ -89,6 +93,9 @@ impl ParamKey {
     }
 
     /// A key from the [name hash](name_hash) of its parameter and the 48 bits of [`ParamKey::hash`] below it.
+    ///
+    /// The 48 bits are not a known function of the name: copy them from the stock key of a stock parameter, and for a
+    /// new parameter use any value, the same in the material and in the depot (see the module documentation).
     pub fn from_parts(name_hash: u32, low48: u64, type_key: u32, count: u16) -> ParamKey {
         let low = u64::from(name_hash & 0xffff);
         ParamKey {

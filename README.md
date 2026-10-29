@@ -21,7 +21,7 @@ Oodle-compressed CAS blocks are decoded through a handle to the game's own Oodle
 
 ```toml
 [dependencies]
-frostbite-formats = "0.2"
+frostbite-formats = "0.3"
 ```
 
 Build a one-bundle superbundle TOC, read it back, and check that the bundle and chunk lookups resolve (this is the example in the crate documentation, run as a doc test):

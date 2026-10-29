@@ -8,7 +8,8 @@
 //!   itself typed ([`layout`]), a data folder and the bundles it holds ([`folder`], [`listing`], [`scope`]), a table
 //!   from EBX file GUIDs to document names ([`names`]), and ReSkate Studio's `.fbmod` mods ([`fbmod`]).
 //! - **EBX documents:** read into typed values, written again, and carried between documents ([`ebx`]).
-//! - **Shaders:** block depots ([`depot`]), the program and texture lookup tables ([`lookup`]), the permutation
+//! - **Shaders:** block depots ([`depot`]) and the keys of their parameters with the names behind them ([`paramdb`]),
+//!   the program and texture lookup tables ([`lookup`]), the permutation
 //!   selector ([`selector`]), permutations and their fixed-function state ([`permutation`]), binding sets
 //!   ([`binding`]), input layouts ([`inputlayout`]) and compiled bytecode containers ([`bytecode`]).
 //! - **Geometry and animation:** MeshSets ([`meshset`]), rigid meshes built from triangles ([`rigid`]), the packed
@@ -97,6 +98,7 @@ pub mod listing;
 pub mod lookup;
 pub mod meshset;
 pub mod names;
+pub mod paramdb;
 pub mod permutation;
 pub mod physics;
 pub mod rigid;

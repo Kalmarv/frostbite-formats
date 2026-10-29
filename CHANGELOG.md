@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **`paramdb` module.** The 16-byte key of a shader parameter (`ParamKey`: the 64-bit hash, the type key, the element count, the identity) and the name behind it. The key is the prefix of every depot parameter record and the `Data` GUID of `ParamDbKeySerialized` in EBX documents. Its top 16 bits and its identity word (bytes 14..16) are the low and high halves of one 32-bit name hash, `paramdb::name_hash`: djb2-XOR over the ASCII-lower-cased document name of the parameter's `ShaderExpressionParameter` asset, started from `NAME_HASH_SEED` (`0x6875ca4d`). All 207 keys the stock documents tie to a parameter asset (40,262 uses) satisfy it; 195 of them are depot parameter prefixes. The 48 bits below the top 16 are no hash of the name that was tried (CityHash64, FarmHash, xxHash, Murmur, FNV in several layouts), so `ParamKey::from_parts` takes them from the caller. `key_uses(doc)` lists the keys of a document with the asset they point at and any `Name` beside them; `ParamNames::add` keeps an asset's name for a key when it hashes to the key's name hash. `depot::Param::key()` gives a parameter's key; the docs of `Param::name`, `count`, `extra` and `slot` now say what the fields are (`slot` is not a texture slot: it is the low half of the name hash).
+
 ## 0.2.2 (2026-10-28)
 
 Additions from the prior-art follow-up; nothing here changes what an existing call returns.

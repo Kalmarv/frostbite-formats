@@ -177,16 +177,19 @@ fn elem_size(ty: u32) -> Option<usize> {
     })
 }
 
-/// One parameter of a block: name hash (its top 16 bits name the texture slot), type, and where its value bytes are.
+/// One parameter of a block: its key (hash, type, count, identity) and where its value bytes are. The first 16 bytes of
+/// the record are a [`ParamKey`](crate::paramdb::ParamKey) ([`Param::key`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Param {
-    /// The 64-bit hash of the parameter's name; for a texture reference its top 16 bits are the slot (see [`Param::slot`]).
+    /// The key's 64-bit hash: its top 16 bits are the low half of the 32-bit [name hash](crate::paramdb::name_hash) of the
+    /// parameter's asset name, the 48 bits below are a second hash that is not explained (see [`crate::paramdb`]).
     pub name: u64,
     /// The value type id: [`TEXTURE`] or one of the numeric types whose element size the reader knows. An unknown type is an error.
     pub ty: u32,
-    /// The 16-bit field stored at offset 12 of the record, kept as stored; its meaning is not known.
+    /// The 16-bit field stored at offset 12 of the record: the element count.
     pub count: u16,
-    /// The 16-bit field stored at offset 14 of the record, kept as stored; its meaning is not known.
+    /// The 16-bit field stored at offset 14 of the record: the key's identity, the high half of the 32-bit
+    /// [name hash](crate::paramdb::name_hash) of the parameter's asset name.
     pub extra: u16,
     /// Offset of the parameter record in the block, and its length.
     pub at: usize,
@@ -195,9 +198,19 @@ pub struct Param {
 }
 
 impl Param {
-    /// The texture slot (top 16 bits of the name hash) of a texture reference.
+    /// The top 16 bits of [`Param::name`]. Despite the name this is not a texture slot: it is the low half of the
+    /// parameter's 32-bit name hash (for `param_base_c`, `0x79a3`), the same for every type of parameter.
     pub fn slot(&self) -> u16 {
         u16::try_from(self.name >> 48).unwrap_or(u16::MAX)
+    }
+    /// The parameter's key.
+    pub fn key(&self) -> crate::paramdb::ParamKey {
+        crate::paramdb::ParamKey {
+            hash: self.name,
+            type_key: self.ty,
+            count: self.count,
+            identity: self.extra,
+        }
     }
     /// A texture reference's 33 value bytes: flag, then two GUIDs (the second the texture asset's file GUID).
     pub fn texture_ref<'a>(&self, block: &'a [u8]) -> Option<&'a [u8]> {

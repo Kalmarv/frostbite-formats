@@ -28,6 +28,7 @@ use frostbite_formats::depot;
 use frostbite_formats::ebx::{self, Document, FieldType, Object, TypeRef, Value};
 use frostbite_formats::folder::{Folder, Source};
 use frostbite_formats::names::GuidNames;
+use frostbite_formats::paramdb::{self, KeyUse, ParamNames};
 use inputs::{Game, Tool, install_file, tool};
 use primase_foundations::compress::oodle::{Oodle, Version};
 
@@ -50,6 +51,10 @@ struct Tally {
     file_names: BTreeMap<[u8; 16], BTreeSet<String>>,
     /// every import's file GUID, with how many imports name it
     imports: BTreeMap<[u8; 16], u64>,
+    /// every non-zero parameter key the documents carry (`ParamDbKeySerialized`), with what stands beside it
+    key_uses: Vec<KeyUse>,
+    /// every depot parameter's key hash -> the (type, identity) pairs its records carry
+    depot_prefix: BTreeMap<u64, BTreeSet<(u32, u16)>>,
 }
 
 impl Tally {
@@ -82,6 +87,10 @@ impl Tally {
         }
         for (k, v) in o.imports {
             *self.imports.entry(k).or_default() += v;
+        }
+        self.key_uses.extend(o.key_uses);
+        for (k, v) in o.depot_prefix {
+            self.depot_prefix.entry(k).or_default().extend(v);
         }
     }
 }
@@ -271,6 +280,7 @@ fn document(t: &mut Tally, bytes: &[u8], name: &str) {
     for ty in &doc.types {
         t.guid_names.entry(ty.guid).or_default().insert(ty.name.clone());
     }
+    t.key_uses.extend(paramdb::key_uses(&doc));
     let mut walk = Walk {
         doc: &doc,
         tally: t,
@@ -411,6 +421,9 @@ fn field_readings_hold_over_the_install() -> Result<(), Box<dyn std::error::Erro
                             for block in &d.blocks {
                                 match depot::params(&block.data) {
                                     Ok(ps) => {
+                                        for p in &ps {
+                                            t.depot_prefix.entry(p.name).or_default().insert((p.ty, p.extra));
+                                        }
                                         t.n("shader blocks parsed to their last byte");
                                         if ps.iter().any(|p| p.ty == 0x566e_2dd0) {
                                             t.n("shader blocks holding parameter type 0x566e2dd0");
@@ -557,6 +570,34 @@ fn field_readings_hold_over_the_install() -> Result<(), Box<dyn std::error::Erro
         let got = names.get(guid).unwrap_or("");
         assert!(expected.contains(got), "{got} not among {expected:?}");
     }
+    // the parameter keys: the census of build 20260929 (an independent EBX reader over the 328,015 payloads) found 207
+    // distinct keys that 40,262 `AppearanceExpressionParamInfo` values tie to a `ShaderExpressionParameter` asset, each
+    // key to one asset, and every asset name hashes (lower-cased djb2-XOR from `NAME_HASH_SEED`) to its key's name hash
+    let mut param_names = ParamNames::new();
+    let added = param_names.add(&t.key_uses, &names);
+    println!(
+        "parameter keys: {} uses, {added:?}; {} depot key hashes",
+        t.key_uses.len(),
+        t.depot_prefix.len()
+    );
+    assert_eq!((added.unnamed, added.refused), (0, 0), "{added:?}");
+    assert_eq!(added.added, 207);
+    assert_eq!(added.added + added.repeated, 40_262);
+    assert_eq!(param_names.len(), 207);
+    // the keys of the documents are the depots' parameter prefixes: 195 of the 207 occur in a depot, with the same type
+    // and identity as the one record every depot parameter hash carries (1,636 distinct hashes)
+    assert_eq!(t.depot_prefix.len(), 1636);
+    assert!(t.depot_prefix.values().all(|s| s.len() == 1), "a key hash with two prefixes");
+    let (mut in_depots, mut differing) = (0, 0);
+    for (key, _) in param_names.iter() {
+        if let Some(seen) = t.depot_prefix.get(&key.hash) {
+            in_depots += 1;
+            if !seen.contains(&(key.type_key, key.identity)) {
+                differing += 1;
+            }
+        }
+    }
+    assert_eq!((in_depots, differing), (195, 0));
     // the depots: every block parses, the one-byte parameter type among them
     assert!(count("shader blocks parsed to their last byte") > 60_000);
     assert!(count("shader blocks holding parameter type 0x566e2dd0") > 0);

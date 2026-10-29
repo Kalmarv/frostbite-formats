@@ -587,7 +587,10 @@ fn field_readings_hold_over_the_install() -> Result<(), Box<dyn std::error::Erro
     // the keys of the documents are the depots' parameter prefixes: 195 of the 207 occur in a depot, with the same type
     // and identity as the one record every depot parameter hash carries (1,636 distinct hashes)
     assert_eq!(t.depot_prefix.len(), 1636);
-    assert!(t.depot_prefix.values().all(|s| s.len() == 1), "a key hash with two prefixes");
+    assert!(
+        t.depot_prefix.values().all(|s| s.len() == 1),
+        "a key hash with two prefixes"
+    );
     let (mut in_depots, mut differing) = (0, 0);
     for (key, _) in param_names.iter() {
         if let Some(seen) = t.depot_prefix.get(&key.hash) {

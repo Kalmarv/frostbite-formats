@@ -13,16 +13,86 @@ use frostbite_formats::paramdb::{KeyUse, LOW48, NAME_HASH_SEED, ParamKey, ParamN
 
 /// (asset name as the bundle manifests state it, key hash, type key, count, identity, name hash = identity << 16 | hash >> 48)
 const MEASURED: [(&str, u64, u32, u16, u16, u32); 10] = [
-    ("common/shadercomponents/parameters/base/param_base_c", 0x79a3_4861_0bb2_3445, 0x14c5_fc30, 1, 0x99e8, 0x99e8_79a3),
-    ("common/shadercomponents/parameters/base/param_base_ny", 0xaf17_ab37_3f4c_d4ca, 0x14c5_fc30, 1, 0xd6f7, 0xd6f7_af17),
-    ("common/shadercomponents/parameters/character/clothing/graphic/graphic0/param_graphic0_enum", 0xbddf_41e0_469b_5631, 0x8e4a_817e, 1, 0xab74, 0xab74_bddf),
-    ("common/shadercomponents/parameters/character/clothing/graphic/graphic0/param_graphic0_scale", 0xda14_b611_faaf_a109, 0x2bb6_5c2d, 1, 0x1bdc, 0x1bdc_da14),
-    ("common/shadercomponents/parameters/character/clothing/graphic/graphic0/param_graphic0_tint", 0xd98b_4359_6948_5311, 0x885e_ff59, 1, 0xab7d, 0xab7d_d98b),
-    ("common/shadercomponents/parameters/character/clothing/graphic/param_usegraphic", 0xa5f9_a6b8_0982_79ad, 0x36ed_3444, 1, 0x825e, 0x825e_a5f9),
-    ("common/shadercomponents/parameters/character/clothing/pattern/param_pattern_c", 0xd086_3882_22d8_5590, 0x14c5_fc30, 1, 0x3bb7, 0x3bb7_d086),
-    ("common/shadercomponents/parameters/character/face/param_facebase_c", 0x51e0_cac4_e89f_42e6, 0x14c5_fc30, 1, 0xb82a, 0xb82a_51e0),
-    ("common/shadercomponents/parameters/regions/region/param_region_pattern_a", 0x0252_afbe_59b5_8d97, 0x2bb6_5c2d, 1, 0x1fb0, 0x1fb0_0252),
-    ("common/shadercomponents/parameters/regions/region2/param_region_color_2a", 0xfca7_9ddc_3252_49ce, 0x885e_ff59, 1, 0x1f99, 0x1f99_fca7),
+    (
+        "common/shadercomponents/parameters/base/param_base_c",
+        0x79a3_4861_0bb2_3445,
+        0x14c5_fc30,
+        1,
+        0x99e8,
+        0x99e8_79a3,
+    ),
+    (
+        "common/shadercomponents/parameters/base/param_base_ny",
+        0xaf17_ab37_3f4c_d4ca,
+        0x14c5_fc30,
+        1,
+        0xd6f7,
+        0xd6f7_af17,
+    ),
+    (
+        "common/shadercomponents/parameters/character/clothing/graphic/graphic0/param_graphic0_enum",
+        0xbddf_41e0_469b_5631,
+        0x8e4a_817e,
+        1,
+        0xab74,
+        0xab74_bddf,
+    ),
+    (
+        "common/shadercomponents/parameters/character/clothing/graphic/graphic0/param_graphic0_scale",
+        0xda14_b611_faaf_a109,
+        0x2bb6_5c2d,
+        1,
+        0x1bdc,
+        0x1bdc_da14,
+    ),
+    (
+        "common/shadercomponents/parameters/character/clothing/graphic/graphic0/param_graphic0_tint",
+        0xd98b_4359_6948_5311,
+        0x885e_ff59,
+        1,
+        0xab7d,
+        0xab7d_d98b,
+    ),
+    (
+        "common/shadercomponents/parameters/character/clothing/graphic/param_usegraphic",
+        0xa5f9_a6b8_0982_79ad,
+        0x36ed_3444,
+        1,
+        0x825e,
+        0x825e_a5f9,
+    ),
+    (
+        "common/shadercomponents/parameters/character/clothing/pattern/param_pattern_c",
+        0xd086_3882_22d8_5590,
+        0x14c5_fc30,
+        1,
+        0x3bb7,
+        0x3bb7_d086,
+    ),
+    (
+        "common/shadercomponents/parameters/character/face/param_facebase_c",
+        0x51e0_cac4_e89f_42e6,
+        0x14c5_fc30,
+        1,
+        0xb82a,
+        0xb82a_51e0,
+    ),
+    (
+        "common/shadercomponents/parameters/regions/region/param_region_pattern_a",
+        0x0252_afbe_59b5_8d97,
+        0x2bb6_5c2d,
+        1,
+        0x1fb0,
+        0x1fb0_0252,
+    ),
+    (
+        "common/shadercomponents/parameters/regions/region2/param_region_color_2a",
+        0xfca7_9ddc_3252_49ce,
+        0x885e_ff59,
+        1,
+        0x1f99,
+        0x1f99_fca7,
+    ),
 ];
 
 fn key(m: &(&str, u64, u32, u16, u16, u32)) -> ParamKey {
@@ -106,7 +176,10 @@ fn names_are_kept_only_when_they_hash_to_the_key() {
     for (i, m) in MEASURED.iter().enumerate() {
         files.insert([u8::try_from(i).unwrap(); 16], m.0);
     }
-    files.insert([0xee; 16], "common/shadercomponents/parameters/base/param_base_c_alias");
+    files.insert(
+        [0xee; 16],
+        "common/shadercomponents/parameters/base/param_base_c_alias",
+    );
     let use_of = |i: usize, guid: u8| KeyUse {
         key: key(&MEASURED[i]),
         asset: Some([guid; 16]),
@@ -130,7 +203,10 @@ fn names_are_kept_only_when_they_hash_to_the_key() {
         },
     ];
     let added = names.add(&uses, &files);
-    assert_eq!((added.added, added.repeated, added.unnamed, added.refused), (2, 1, 1, 2));
+    assert_eq!(
+        (added.added, added.repeated, added.unnamed, added.refused),
+        (2, 1, 1, 2)
+    );
     assert_eq!(names.len(), 2);
     assert_eq!(names.get(&key(&MEASURED[0])), Some(MEASURED[0].0));
     assert_eq!(names.by_hash(MEASURED[1].1), Some(MEASURED[1].0));

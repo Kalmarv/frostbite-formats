@@ -107,6 +107,11 @@ require = 'gate'       # optional: an input marked `gate` fails its test instead
 
 See [CONTRIBUTING.md](CONTRIBUTING.md), including how to report a file this crate cannot read.
 
+## Check the examples
+
+From the repository root, `cargo test -p frostbite-formats --doc` checks the crate documentation, and
+`cargo build -p frostbite-formats --examples` builds its example programs. Examples that read paths need the caller's files; the repository ships no game assets.
+
 ## License
 
 GPL-3.0-or-later, see [LICENSE](LICENSE). Used by [primase](https://github.com/Kalmarv/primase), a game-asset conversion library.

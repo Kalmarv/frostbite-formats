@@ -109,7 +109,7 @@ impl Toc {
 ///   the patch's chunks are kept as they are.
 ///
 /// The merged TOC keeps the patch's flags word minus the base bits and the Huffman bit, so it reads as a TOC that
-/// stands alone. Its entries are in the order of the perfect hash [`write`] lays out ([`perfect_hash`] over the merged
+/// stands alone. Its entries are in the order of the perfect hash [`write()`] lays out ([`perfect_hash`] over the merged
 /// keys), so [`verify`] holds and the TOC writes and reads back as it is. An error when the
 /// merged keys are not unique (a duplicate name that differs only in case within the patch or the base).
 pub fn merge(base: &Toc, patch: &Toc) -> Result<Toc> {

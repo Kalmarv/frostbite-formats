@@ -1,5 +1,7 @@
 # frostbite-formats
 
+[![crates.io: frostbite-formats](https://img.shields.io/crates/v/frostbite-formats?label=frostbite-formats)](https://crates.io/crates/frostbite-formats) [![docs.rs](https://img.shields.io/docsrs/frostbite-formats)](https://docs.rs/frostbite-formats) [![CI](https://img.shields.io/github/actions/workflow/status/Kalmarv/frostbite-formats/ci.yml?branch=main&label=CI)](https://github.com/Kalmarv/frostbite-formats/actions/workflows/ci.yml)
+
 A Rust library that reads and writes the Frostbite file formats of the game skate. (2025). It covers the installed game's data folder and the `.fbmod` mods that [ReSkate Studio](https://github.com/Dingo-Shenanigans/ReSkate) writes.
 
 ## Features

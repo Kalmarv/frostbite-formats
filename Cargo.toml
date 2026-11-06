@@ -39,7 +39,7 @@ publish = true
 [workspace.dependencies]
 half = { version = "=2.7.1", default-features = false }
 primase-foundations = "0.3.1"
-primase-testdata = { version = "0.1.6", git = "https://github.com/Kalmarv/primase-testdata", rev = "40acdd6a2775412cc812f67e5b3edfdc9b76c54c" }
+primase-testdata = "0.1.8"
 sha1 = { version = "=0.11.0", default-features = false }
 thiserror = { version = "=2.0.21", default-features = false, features = ["std"] }
 
